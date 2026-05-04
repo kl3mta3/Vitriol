@@ -37,6 +37,7 @@ def _ensure_cinzel_loaded() -> str | None:
 from .drop_zone import DropZone
 from .playlist import Playlist
 from .playlist_item import PlaylistItemWidget, Status
+from .vignette import VignetteOverlay
 from . import dialogs
 from ..core.conversion_queue import ConversionQueue
 from ..utils import settings
@@ -113,6 +114,9 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(central)
         outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(10)
+        # Atmosphere overlay — paint-only, click-through, resizes with central.
+        # Created here so the rest of _build_ui's widgets stack underneath.
+        self._vignette = VignetteOverlay(central)
 
         # Top bar: title + global toggles (Philosopher's Stone, Verify Round-Trip).
         topbar = QHBoxLayout()
@@ -163,6 +167,7 @@ class MainWindow(QMainWindow):
         topbar.addWidget(_help_icon(stone_tip))
 
         self.chk_verify = QCheckBox("Verify Round-Trip")
+        self.chk_verify.setObjectName("VerifyToggle")
         self.chk_verify.setChecked(bool(settings.get("verify_round_trip")))
         self.chk_verify.setToolTip(verify_tip)
         self.chk_verify.toggled.connect(self._on_verify_toggled)

@@ -15,8 +15,15 @@ from app import format_handlers
 
 def _load_stylesheet(app: QApplication) -> None:
     qss = app_root() / "theme.qss"
-    if qss.exists():
-        app.setStyleSheet(qss.read_text(encoding="utf-8"))
+    if not qss.exists():
+        return
+    text = qss.read_text(encoding="utf-8")
+    # Substitute {RES} with the resources directory so QSS image: url() rules
+    # can reference SVG assets we ship in resources/. QSS only accepts absolute
+    # paths or paths inside Qt resource files; this lets us avoid Qt resources.
+    res = str(resources_dir()).replace("\\", "/")
+    text = text.replace("{RES}", res)
+    app.setStyleSheet(text)
 
 
 def _load_app_icon(app: QApplication) -> None:

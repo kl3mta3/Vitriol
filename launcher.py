@@ -146,8 +146,9 @@ DEJAVU_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/ver
 DEJAVU_SHA = ""
 
 # Cinzel — OFL-licensed engraved-cap serif from Google Fonts. Used for the
-# "Transmute" title only. The static Regular face lives under static/.
-CINZEL_URL = "https://github.com/google/fonts/raw/main/ofl/cinzel/static/Cinzel-Regular.ttf"
+# "Transmute" title only. The repo only ships the variable font now —
+# brackets must be URL-encoded.
+CINZEL_URL = "https://github.com/google/fonts/raw/main/ofl/cinzel/Cinzel%5Bwght%5D.ttf"
 CINZEL_SHA = ""
 
 

@@ -116,21 +116,30 @@ QLineEdit {
 
 /* StatusGlyph paints itself — no QSS needed for the per-row status indicator. */
 
-/* Philosopher's Stone toggle "active" state: gold-tinted text + indicator
-   tinted red (the alchemy-active accent #5e051b). When the toggle is off the
-   defaults from QCheckBox above apply. The dynamic property is set by
-   MainWindow._refresh_stone_visuals(). */
+/* Topbar toggles (Philosopher's Stone, Verify Round-Trip) get a hexagon
+   indicator in place of the default square checkbox. Stone fills with the
+   muted red on check; Verify fills with the brand purple/blue. Resource
+   paths are substituted at load time by _load_stylesheet({RES} -> abs path). */
+QCheckBox#StoneToggle::indicator,
+QCheckBox#VerifyToggle::indicator {
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    border: none;
+    image: url({RES}/hex-empty.svg);
+}
+QCheckBox#StoneToggle::indicator:checked {
+    image: url({RES}/hex-filled-red.svg);
+}
+QCheckBox#VerifyToggle::indicator:checked {
+    image: url({RES}/hex-filled-purple.svg);
+}
+
+/* Philosopher's Stone "active" label: muted red text + bold. Slightly
+   brighter red than the indicator fill so the text reads on dark bg. */
 QCheckBox#StoneToggle[stoneActive="true"] {
-    color: #d4a574;
+    color: #c0392b;
     font-weight: 600;
-}
-QCheckBox#StoneToggle[stoneActive="true"]::indicator {
-    background-color: #5e051b;
-    border-color: #d4a574;
-}
-QCheckBox#StoneToggle[stoneActive="true"]::indicator:checked {
-    background-color: #d4a574;
-    border-color: #d4a574;
 }
 
 QListWidget {

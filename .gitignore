@@ -16,6 +16,8 @@ wheels/*
 output/*/*
 !output/*/.gitkeep
 resources/*.ttf
+resources/fonts/*.ttf
+resources/fonts/*.otf
 logs/
 
 .pytest_cache/
