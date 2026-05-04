@@ -267,15 +267,15 @@ def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
             break
     if not scratch:
         return False
-    # Mandelbrot inverse: XOR the same buffer prefix with the deterministic
-    # full-image RGB keystream and re-scan for magic. Only XOR the first
-    # min(scratch, keystream) bytes — magic is always at the start anyway.
-    keystream = _mandelbrot_keystream(width, height)
-    m = min(len(scratch), len(keystream))
-    xord = bytearray(m)
-    for i in range(m):
-        xord[i] = scratch[i] ^ keystream[i]
-    return MAGIC_V2 in xord
+    # Mandelbrot bit-packed envelope: read the bottom 4 bits of each pixel
+    # byte and reassemble into a byte stream; check for MAGIC_V2.
+    max_env = len(scratch) // 2
+    if max_env >= 8:
+        env_prefix = _mandelbrot_unpack_envelope_from_pixels(
+            bytes(scratch), min(max_env, 64 * 1024))
+        if MAGIC_V2 in env_prefix:
+            return True
+    return False
 
 # MKV host parameters. 42 fps is intentional — non-standard rate that
 # fingerprints Masquerade output: combined with the UCMSv1 magic in the
@@ -995,6 +995,73 @@ _MANDELBROT_SALT = b"transmute-mandelbrot-v1"
 # NumPy-vectorized full-image Mandelbrot keystream. RGB-interleaved
 # (3 bytes per pixel) so the fractal renders in color directly, without
 # tiling. Generation cost is ~0.3-0.6 sec for a 1080² image.
+#
+# Cross-category embed scheme: each pixel byte's TOP 4 bits hold the
+# fractal color, BOTTOM 4 bits hold a nibble of the source envelope.
+# The whole image displays the colored fractal everywhere (just at 4-bit
+# color depth per channel = 16 levels = 4096 total colors), and the
+# envelope can be reassembled by reading the bottom 4 bits across the
+# pixel stream in order.
+
+# Two pixel bytes carry one envelope byte (low nibble first, then high).
+_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE = 2
+
+
+def _mandelbrot_pack_envelope_into_fractal(envelope: bytes, fractal: bytes,
+                                             total_pixel_bytes: int) -> bytes:
+    """Combine fractal pixel bytes (top 4 bits) with envelope nibbles
+    (bottom 4 bits). Returns a bytes of length `total_pixel_bytes`.
+
+    `fractal` must be at least `total_pixel_bytes` long.
+    `envelope` may be shorter than total_pixel_bytes / 2 — bytes past
+    the envelope end get a zero nibble (so those pixels show the pure
+    fractal at full top-4-bit depth)."""
+    out = bytearray(total_pixel_bytes)
+    env_len = len(envelope)
+    for i in range(total_pixel_bytes):
+        env_idx = i >> 1   # i // 2
+        if env_idx < env_len:
+            nibble_high = i & 1
+            byte = envelope[env_idx]
+            nib = (byte >> 4) if nibble_high else (byte & 0x0F)
+        else:
+            nib = 0
+        out[i] = (fractal[i] & 0xF0) | nib
+    return bytes(out)
+
+
+def _mandelbrot_unpack_envelope_from_pixels(pixel_bytes: bytes,
+                                              max_envelope_bytes: int) -> bytes:
+    """Reassemble envelope bytes from the bottom 4 bits of pixel_bytes.
+    Reads up to `max_envelope_bytes` bytes (or as many as fit). Returns
+    the recovered envelope prefix."""
+    n_env = min(max_envelope_bytes, len(pixel_bytes) // 2)
+    out = bytearray(n_env)
+    for b in range(n_env):
+        low = pixel_bytes[2 * b] & 0x0F
+        high = pixel_bytes[2 * b + 1] & 0x0F
+        out[b] = (high << 4) | low
+    return bytes(out)
+
+
+def _mandelbrot_calc_image_dims(payload_size: int, ext_len: int) -> "Tuple[int, int]":
+    """Square (W, H) sized so the bit-packed envelope fits with the
+    Mandelbrot fractal showing across the whole image.
+
+    Total envelope bytes = header + payload.
+    Pixel bytes needed = 2 * envelope_bytes (low nibble + high nibble per byte).
+    Pixels needed = pixel_bytes / 3 (3 channels per pixel).
+    """
+    header_size = 8 + 1 + ext_len + 8 + 4 + 4   # 25 + ext_len
+    envelope_bytes = payload_size + header_size
+    pixel_bytes_needed = envelope_bytes * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+    pixels_needed = (pixel_bytes_needed + 2) // 3
+    for cap, dim in _IMAGE_TIERS:
+        if pixels_needed <= dim * dim:
+            return dim, dim
+    side = math.ceil(math.sqrt(pixels_needed))
+    side = max(_MIN_DIM, ((side + 1023) // 1024) * 1024)
+    return side, side
 
 
 def _mandelbrot_keystream(width: int, height: int) -> bytes:
@@ -1036,16 +1103,13 @@ def _png_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            mandelbrot: bool = False) -> None:
     from .streaming_image import stream_png_write
     payload_size = src_path.stat().st_size
-    width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
-    # Mandelbrot mode: pad with zeros so the visible pad region becomes
-    # the raw keystream (zero XOR keystream = keystream). Otherwise the
-    # pseudo-random pad XOR'd with anything stays uniformly random and
-    # the fractal isn't visible.
-    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height,
-                                           cancel, pad_zero=mandelbrot)
     if mandelbrot:
-        pixel_iter = _xor_pixel_iter(pixel_iter,
-                                      _mandelbrot_keystream(width, height))
+        width, height, pixel_bytes = _build_mandelbrot_image(
+            src_path.read_bytes(), src_ext, cancel)
+        stream_png_write(dst, width, height, iter([pixel_bytes]), cancel, progress)
+        return
+    width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
+    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height, cancel)
     stream_png_write(dst, width, height, pixel_iter, cancel, progress)
 
 
@@ -1055,37 +1119,73 @@ def _bmp_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            mandelbrot: bool = False) -> None:
     from .streaming_image import stream_bmp_write
     payload_size = src_path.stat().st_size
-    width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
-    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height,
-                                           cancel, pad_zero=mandelbrot)
     if mandelbrot:
-        pixel_iter = _xor_pixel_iter(pixel_iter,
-                                      _mandelbrot_keystream(width, height))
+        width, height, pixel_bytes = _build_mandelbrot_image(
+            src_path.read_bytes(), src_ext, cancel)
+        stream_bmp_write(dst, width, height, iter([pixel_bytes]), cancel, progress)
+        return
+    width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
+    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height, cancel)
     stream_bmp_write(dst, width, height, pixel_iter, cancel, progress)
 
 
 def _png_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
                               mandelbrot: bool = False) -> None:
     from .streaming_image import stream_png_write
-    width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
-    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height,
-                                            pad_zero=mandelbrot)
     if mandelbrot:
-        pixel_iter = _xor_pixel_iter(pixel_iter,
-                                      _mandelbrot_keystream(width, height))
+        width, height, pixel_bytes = _build_mandelbrot_image(src_bytes, src_ext)
+        stream_png_write(dst, width, height, iter([pixel_bytes]))
+        return
+    width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
+    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height)
     stream_png_write(dst, width, height, pixel_iter)
 
 
 def _bmp_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
                               mandelbrot: bool = False) -> None:
     from .streaming_image import stream_bmp_write
-    width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
-    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height,
-                                            pad_zero=mandelbrot)
     if mandelbrot:
-        pixel_iter = _xor_pixel_iter(pixel_iter,
-                                      _mandelbrot_keystream(width, height))
+        width, height, pixel_bytes = _build_mandelbrot_image(src_bytes, src_ext)
+        stream_bmp_write(dst, width, height, iter([pixel_bytes]))
+        return
+    width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
+    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height)
     stream_bmp_write(dst, width, height, pixel_iter)
+
+
+def _build_mandelbrot_image(src_bytes: bytes, src_ext: str,
+                             cancel: Optional["CancellationToken"] = None
+                             ) -> "Tuple[int, int, bytes]":
+    """Build the bit-packed Mandelbrot image. Returns (width, height,
+    pixel_bytes) ready to stream into stream_png_write / stream_bmp_write.
+
+    Image dims are sized via _mandelbrot_calc_image_dims so the bit-packed
+    envelope fits with the fractal occupying the full image. Each pixel
+    byte's top 4 bits = colored fractal; bottom 4 bits = envelope nibble
+    (or zero past the envelope, leaving the fractal undisturbed there).
+    """
+    payload_size = len(src_bytes)
+    width, height = _mandelbrot_calc_image_dims(
+        payload_size, len(src_ext.encode("utf-8")))
+    if cancel is not None:
+        cancel.check()
+    fractal = _mandelbrot_keystream(width, height)
+    if cancel is not None:
+        cancel.check()
+    # Build the envelope verbatim (header + payload, no pad — pad is
+    # implicit in the "envelope ends before pixel stream ends" gap, where
+    # the bottom-4-bit nibble defaults to zero leaving the pure fractal).
+    header = _v2_header_bytes(payload_size, src_ext, width, height)
+    envelope = header + src_bytes
+    total_pixel_bytes = width * height * 3
+    # Sanity: dims should always be large enough.
+    if len(envelope) * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE > total_pixel_bytes:
+        raise RuntimeError(
+            f"Mandelbrot dim calc bug: envelope={len(envelope)} bytes needs "
+            f"{len(envelope) * 2} pixel bytes but image holds {total_pixel_bytes}.")
+    pixel_bytes = _mandelbrot_pack_envelope_into_fractal(
+        envelope, fractal, total_pixel_bytes)
+    return width, height, pixel_bytes
 
 
 def _extract_v2_from_pixel_iter(pixel_iter: Iterator[bytes], dst_path: Path,
@@ -1161,9 +1261,10 @@ def _bmp_extract_v2_to_file(src: Path, dst_path: Path,
 def _extract_v2_dual_attempt(src: Path, dst_path: Path,
                               cancel: Optional["CancellationToken"],
                               stream_reader) -> str:
-    """Try plain v2 extraction first (same-category Stone). If the magic
-    isn't where it should be, retry with the Mandelbrot inverse XOR applied
-    to the pixel byte stream (cross-category Stone aesthetic).
+    """Try plain v2 extraction first (same-category Stone — raw bytes in
+    pixels, MAGIC_V2 at start). If that fails, try the Mandelbrot bit-pack
+    extraction (cross-category Stone aesthetic — envelope nibbles in the
+    bottom 4 bits of each pixel byte).
 
     Buffers the entire pixel byte stream into memory once. For 4096^2 RGB
     that's 48 MB temporarily — acceptable for the size range Stone uses.
@@ -1175,25 +1276,22 @@ def _extract_v2_dual_attempt(src: Path, dst_path: Path,
             cancel.check()
         pixel_bytes.extend(chunk)
 
-    # Attempt 1: plain (no Mandelbrot)
+    # Attempt 1: plain — raw byte stream with MAGIC_V2 at offset 0
+    # (same-category Stone byte-passthrough).
     if len(pixel_bytes) >= 8 and bytes(pixel_bytes[:8]) == MAGIC_V2:
         return _extract_v2_from_pixel_iter(iter([bytes(pixel_bytes)]), dst_path, cancel)
 
-    # Attempt 2: Mandelbrot inverse — XOR the buffer with the deterministic
-    # full-image RGB keystream, then re-check for magic.
-    keystream = _mandelbrot_keystream(width, height)
-    n = min(len(pixel_bytes), len(keystream))
-    xord = bytearray(len(pixel_bytes))
-    for i in range(n):
-        xord[i] = pixel_bytes[i] ^ keystream[i]
-    # Any tail bytes past the keystream length stay as-is (shouldn't happen
-    # in normal use; defensive).
-    for i in range(n, len(pixel_bytes)):
-        xord[i] = pixel_bytes[i]
-    if len(xord) >= 8 and bytes(xord[:8]) == MAGIC_V2:
-        return _extract_v2_from_pixel_iter(iter([bytes(xord)]), dst_path, cancel)
+    # Attempt 2: Mandelbrot bit-packed envelope — read low 4 bits of each
+    # pixel byte and reassemble into envelope bytes.
+    max_envelope_bytes = len(pixel_bytes) // 2
+    if max_envelope_bytes >= 8:
+        envelope = _mandelbrot_unpack_envelope_from_pixels(
+            bytes(pixel_bytes), max_envelope_bytes)
+        if envelope[:8] == MAGIC_V2:
+            return _extract_v2_from_pixel_iter(iter([envelope]), dst_path, cancel)
 
-    raise ValueError("v2 envelope: magic not found in plain or Mandelbrot-decoded pixel data.")
+    raise ValueError("v2 envelope: magic not found in plain pixel bytes "
+                     "or in the bottom-4-bit Mandelbrot bit-packed stream.")
 
 
 # ---------------------------------------------------------------------------
