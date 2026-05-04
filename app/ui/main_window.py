@@ -16,6 +16,36 @@ from ..core.conversion_queue import ConversionQueue
 from ..utils import settings
 
 
+def _help_icon(tooltip_text: str) -> QLabel:
+    """A small "?" pill that shows `tooltip_text` on hover.
+
+    Styled inline so we don't have to extend theme.qss for one-off elements.
+    Width/height are forced to 16px so it stays compact next to a checkbox.
+    """
+    lbl = QLabel("?")
+    lbl.setObjectName("HelpIcon")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lbl.setFixedSize(16, 16)
+    lbl.setCursor(Qt.CursorShape.WhatsThisCursor)
+    lbl.setStyleSheet(
+        "QLabel#HelpIcon {"
+        " background-color: #2a2a3a;"
+        " color: #b0b0c0;"
+        " border: 1px solid #3a3a4a;"
+        " border-radius: 8px;"
+        " font-size: 10px;"
+        " font-weight: bold;"
+        "}"
+        "QLabel#HelpIcon:hover {"
+        " background-color: #3b82f6;"
+        " color: #ffffff;"
+        " border-color: #3b82f6;"
+        "}"
+    )
+    lbl.setToolTip(tooltip_text)
+    return lbl
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -42,22 +72,32 @@ class MainWindow(QMainWindow):
         title.setObjectName("AppTitle")
         topbar.addWidget(title)
         topbar.addStretch(1)
+
+        masq_tip = (
+            "Enables cross-format byte-preserving conversions (text→audio, image→text, etc.). "
+            "Files keep their original bytes intact while wearing another format's container. "
+            "Round-trip safe with lossless target formats only."
+        )
+        verify_tip = (
+            "After conversion, immediately reverses it and compares hashes to confirm "
+            "bit-perfect preservation. Doubles conversion time. Output saves only if "
+            "verification passes."
+        )
+
         self.chk_masquerade = QCheckBox("Masquerade Mode")
         self.chk_masquerade.setChecked(bool(settings.get("masquerade_enabled")))
-        self.chk_masquerade.setToolTip(
-            "Hide any file's bytes inside a lossless container (WAV, PNG, BMP, TXT). "
-            "Expands the target dropdowns to include cross-category byte-passthrough."
-        )
+        self.chk_masquerade.setToolTip(masq_tip)
         self.chk_masquerade.toggled.connect(self._on_masquerade_toggled)
         topbar.addWidget(self.chk_masquerade)
+        topbar.addWidget(_help_icon(masq_tip))
+
         self.chk_verify = QCheckBox("Verify Round-Trip")
         self.chk_verify.setChecked(bool(settings.get("verify_round_trip")))
-        self.chk_verify.setToolTip(
-            "After converting, immediately convert back and hash-compare against the source. "
-            "Only meaningful with Masquerade Mode on."
-        )
+        self.chk_verify.setToolTip(verify_tip)
         self.chk_verify.toggled.connect(self._on_verify_toggled)
         topbar.addWidget(self.chk_verify)
+        topbar.addWidget(_help_icon(verify_tip))
+
         self._update_verify_enabled()
         outer.addLayout(topbar)
 
@@ -104,18 +144,16 @@ class MainWindow(QMainWindow):
         # Filter to known extensions; unknown ones are still added so the user sees the error inline.
         self.playlist.add_paths([Path(p) for p in paths],
                                 masquerade=self.chk_masquerade.isChecked())
-        # Wire per-item signals (new widgets only)
+        # Wire per-item signals exactly once. Marker on the widget itself
+        # avoids the disconnect/reconnect dance (which prints harmless but
+        # noisy RuntimeWarnings for newly-created widgets that have nothing
+        # to disconnect from).
         for w in self.playlist.items():
-            try:
-                w.convert_requested.disconnect(self._start_convert)  # type: ignore[arg-type]
-            except (TypeError, RuntimeError):
-                pass
-            try:
-                w.stop_requested.disconnect(self._stop_convert)  # type: ignore[arg-type]
-            except (TypeError, RuntimeError):
-                pass
+            if getattr(w, "_signals_wired", False):
+                continue
             w.convert_requested.connect(self._start_convert)
             w.stop_requested.connect(self._stop_convert)
+            w._signals_wired = True
         self.statusBar().showMessage(f"Added {len(paths)} item(s).")
 
     # --- Per-item ----------------------------------------------------------

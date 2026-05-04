@@ -79,6 +79,11 @@ class PlaylistItemWidget(QWidget):
         self._is_running = False
         self._estimated_total_sec: float | None = None
         self._elapsed_sec: float = 0.0
+        # When False, the save folder auto-derives from the *target* ext's
+        # category and refreshes whenever the target dropdown changes. Once
+        # the user picks a folder via _pick_dir, we stop overriding their
+        # choice on subsequent target changes.
+        self._save_dir_overridden = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -106,9 +111,8 @@ class PlaylistItemWidget(QWidget):
         self.src_combo.setMinimumWidth(72)
         layout.addWidget(self.src_combo)
 
-        # 5. Target dropdown
+        # 5. Target dropdown (populated AFTER convert_btn is created — see below)
         self.dst_combo = QComboBox()
-        self._populate_targets()
         self.dst_combo.setMinimumWidth(82)
         layout.addWidget(self.dst_combo)
 
@@ -143,6 +147,15 @@ class PlaylistItemWidget(QWidget):
         self.remove_btn.setObjectName("Danger")
         self.remove_btn.clicked.connect(lambda: self.remove_requested.emit(self))
         layout.addWidget(self.remove_btn)
+
+        # Now that convert_btn exists, populate the target dropdown.
+        # Doing this after every widget is created lets _populate_targets
+        # enable/disable convert_btn based on whether any targets exist.
+        self._populate_targets()
+        # Save folder follows the *target* extension's category, not the
+        # source's — so .txt → .wav saves to output/Audio/, not output/Text/.
+        self._refresh_save_field()
+        self.dst_combo.currentTextChanged.connect(self._on_target_changed)
 
     # --- public API ---------------------------------------------------------
     def is_checked(self) -> bool:
@@ -245,8 +258,21 @@ class PlaylistItemWidget(QWidget):
             self.dst_combo.setCurrentText(previous)
 
     def _default_save_dir(self) -> Path:
-        cat = fh.EXT_CATEGORY.get(self.src_ext, "Text")
+        """Pick the output folder based on the *target* extension's category.
+        Falls back to the source ext if no target is chosen yet."""
+        ext = self.target_ext() or self.src_ext
+        cat = fh.EXT_CATEGORY.get(ext, "Text")
         return output_dir(cat)
+
+    def _refresh_save_field(self) -> None:
+        """Update the displayed save folder to match the current target ext.
+        Skipped if the user has manually picked a folder via _pick_dir."""
+        if self._save_dir_overridden:
+            return
+        self.save_field.setText(str(self._default_save_dir()))
+
+    def _on_target_changed(self, _new_text: str) -> None:
+        self._refresh_save_field()
 
     def _toggle_save_field(self, checked: bool) -> None:
         self.save_field.setVisible(not checked)
@@ -255,6 +281,8 @@ class PlaylistItemWidget(QWidget):
         d = QFileDialog.getExistingDirectory(self, "Choose output folder", self.save_field.text())
         if d:
             self.save_field.setText(d)
+            # User has chosen explicitly — stop auto-deriving on target changes.
+            self._save_dir_overridden = True
 
     def _on_convert_or_stop(self) -> None:
         if self._is_running:

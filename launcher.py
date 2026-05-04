@@ -137,7 +137,9 @@ def _install_packages(packages: list[str], log) -> bool:
 FFMPEG_URL = "https://github.com/GyanD/codexffmpeg/releases/download/7.1/ffmpeg-7.1-essentials_build.zip"
 FFMPEG_SHA = ""
 
-ASSIMP_URL = "https://github.com/assimp/assimp/releases/download/v5.4.3/assimp-5.4.3-win64.zip"
+# Assimp v5.x release archives don't include prebuilt Windows binaries.
+# v6.0.0+ ships windows-x64-v{ver}.zip with the DLL inside.
+ASSIMP_URL = "https://github.com/assimp/assimp/releases/download/v6.0.5/windows-x64-v6.0.5.zip"
 ASSIMP_SHA = ""
 
 DEJAVU_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
