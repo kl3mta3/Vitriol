@@ -27,18 +27,20 @@ def _load_stylesheet(app: QApplication) -> None:
 
 
 def _load_app_icon(app: QApplication) -> None:
-    """Set the app/window icon. Prefers the multi-resolution .ico (Windows
-    picks the right embedded frame per surface — taskbar, alt-tab, title bar,
-    file-explorer thumbnail), falls back to the SVG if the .ico hasn't been
-    generated yet (run `python tools/generate_icons.py` to produce it)."""
+    """Set the app/window icon. Prefers the original logo.ico (discs filled
+    with dark on transparent canvas) — at 16/32 px the dark discs anchor the
+    composition visually, and on dark host surfaces (Windows dark-theme
+    title bar / taskbar) they blend into the chrome. Falls back through the
+    other variants if logo.ico isn't present."""
     res = resources_dir()
-    ico = res / "icons" / "logo.ico"
-    if ico.exists():
-        app.setWindowIcon(QIcon(str(ico)))
-        return
-    svg = res / "logo.svg"
-    if svg.exists():
-        app.setWindowIcon(QIcon(str(svg)))
+    for candidate in ("icons/logo.ico",
+                       "icons/logo-outline.ico",
+                       "icons/logo-bg.ico",
+                       "logo.svg"):
+        p = res / candidate
+        if p.exists():
+            app.setWindowIcon(QIcon(str(p)))
+            return
 
 
 def _install_exception_logging(log) -> None:

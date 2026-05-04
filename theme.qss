@@ -167,7 +167,13 @@ QScrollBar::handle:vertical {
 QScrollBar::handle:vertical:hover { background: #3a3a4a; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
-QStatusBar { background-color: #0a0a0f; color: #9090a0; border-top: 1px solid #1f1f2e; }
+QStatusBar {
+    background-color: #0a0a0f;
+    color: #9090a0;
+    border-top: 1px solid #1f1f2e;
+    padding-left: 32px;
+    padding-bottom: 30px;
+}
 
 QToolTip {
     background-color: #1f1f2e;

@@ -29,7 +29,7 @@ from ..core.intermediate import (
     Paragraph, Run, Table, TextDoc,
 )
 from ..utils.cancellation import CancellationToken
-from ..utils.paths import resources_dir
+from ..utils.paths import resources_dir, find_font
 from ._pdf_ttf import (
     TTFFont, TTFParseError, build_to_unicode_cmap, build_widths_array,
     encode_text_for_type0,
@@ -76,6 +76,13 @@ class _PdfWriter:
         self._objects: List[Optional[bytes]] = [None]  # 1-indexed
         self._pages: List[int] = []
         self._page_streams: List[bytearray] = [bytearray()]
+        # Per-page XObject map: name → object number. Each page's /Resources
+        # ends up with /XObject << /Im{n} {n} 0 R ... >> containing only the
+        # XObjects actually drawn on that page. Index parallels _page_streams.
+        self._page_xobjects: List[dict[str, int]] = [{}]
+        # Cache: id(Image) → object number. Lets the same Image block embedded
+        # multiple times reuse one /XObject instead of duplicating data.
+        self._image_xobject_cache: dict[int, int] = {}
         self._cursor_y = PAGE_H - MARGIN_T
         self._dejavu_ttf, self._dejavu_font = self._load_dejavu()
         # F1=Helvetica, F2=Helvetica-Bold, F3=Helvetica-Oblique, F4=Courier,
@@ -83,8 +90,8 @@ class _PdfWriter:
         self._has_dejavu = self._dejavu_font is not None
 
     def _load_dejavu(self) -> tuple[Optional[bytes], Optional[TTFFont]]:
-        ttf = resources_dir() / "DejaVuSans.ttf"
-        if not ttf.exists():
+        ttf = find_font("DejaVuSans.ttf")
+        if ttf is None:
             return None, None
         try:
             data = ttf.read_bytes()
@@ -120,8 +127,7 @@ class _PdfWriter:
         elif isinstance(blk, Table):
             self._render_table(blk, indent)
         elif isinstance(blk, Image):
-            self._wrap_text(f"[image: {blk.alt or 'image'}]", size=BODY_SIZE, italic=True,
-                            indent=indent, space_after=6)
+            self._render_image(blk, indent)
         elif isinstance(blk, CodeBlock):
             for line in blk.text.splitlines() or [""]:
                 self._wrap_text(line, size=BODY_SIZE - 1, mono=True, indent=indent + 12, space_after=0, no_wrap=True)
@@ -136,6 +142,83 @@ class _PdfWriter:
 
     def _runs_to_inline(self, runs: List[Run]) -> str:
         return "".join(r.text for r in runs)
+
+    # --- Image rendering ---------------------------------------------------
+    def _render_image(self, image: Image, indent: int) -> None:
+        """Embed `image` as a PDF /XObject /Image and draw it at the current
+        cursor. Falls back to the [image: alt] placeholder text on errors."""
+        try:
+            obj_no, w_px, h_px = self._embed_image_xobject(image)
+        except Exception:
+            self._wrap_text(f"[image: {image.alt or 'image'}]",
+                             size=BODY_SIZE, italic=True,
+                             indent=indent, space_after=6)
+            return
+
+        # Compute drawn size: scale to fit available width, preserve aspect.
+        max_w_pt = PAGE_W - MARGIN_L - MARGIN_R - indent
+        scale = min(1.0, max_w_pt / max(1, w_px))
+        draw_w = w_px * scale
+        draw_h = h_px * scale
+
+        # Page break if it doesn't fit
+        if self._cursor_y - draw_h < MARGIN_B:
+            self._new_page()
+        x = MARGIN_L + indent
+        y = self._cursor_y - draw_h    # PDF origin is bottom-left
+
+        # Register XObject name on the current page
+        name = f"Im{obj_no}"
+        self._page_xobjects[-1][name] = obj_no
+
+        # Content stream operators: q (save) + cm (transform: scale + translate)
+        # + Do (paint XObject) + Q (restore).
+        op = (f"q\n{draw_w:.2f} 0 0 {draw_h:.2f} {x:.2f} {y:.2f} cm\n"
+               f"/{name} Do\nQ\n").encode("latin-1")
+        self._page_streams[-1].extend(op)
+        self._cursor_y -= draw_h + 6
+
+    def _embed_image_xobject(self, image: Image) -> tuple[int, int, int]:
+        """Allocate a /XObject /Image PDF object for `image`. Returns
+        (object_number, width_px, height_px). Cached by id(image) so
+        multiple references reuse one object."""
+        cache_key = id(image)
+        if cache_key in self._image_xobject_cache:
+            obj_no = self._image_xobject_cache[cache_key]
+            # We still need dims for cursor advance — re-parse cheaply
+            w, h = _peek_image_dims(image.data, image.mime)
+            return obj_no, w, h
+
+        data = image.data
+        mime = (image.mime or "").lower()
+
+        if mime == "image/jpeg":
+            # JPEG passthrough — DCTDecode filter, no re-encoding
+            w, h, bps, comps = _parse_jpeg_dims(data)
+            cs = ("/DeviceRGB" if comps == 3
+                  else "/DeviceGray" if comps == 1
+                  else "/DeviceCMYK")
+            filt = "/DCTDecode"
+            raw = data
+        else:
+            # Decode anything else through Pillow → re-encode as DeviceRGB FlateDecode
+            from PIL import Image as PILImage
+            from io import BytesIO
+            img = PILImage.open(BytesIO(data)).convert("RGB")
+            w, h = img.size
+            raw = zlib.compress(img.tobytes())
+            filt = "/FlateDecode"
+            cs = "/DeviceRGB"
+            bps = 8
+
+        obj_no = self._reserve()
+        header = (f"{obj_no} 0 obj\n"
+                  f"<< /Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                  f"/ColorSpace {cs} /BitsPerComponent {bps} "
+                  f"/Filter {filt} /Length {len(raw)} >>\nstream\n").encode("latin-1")
+        self._set(obj_no, header + raw + b"\nendstream\nendobj\n")
+        self._image_xobject_cache[cache_key] = obj_no
+        return obj_no, w, h
 
     def _render_table(self, tbl: Table, indent: int) -> None:
         # Compute column widths from text content; render each row as fixed-width.
@@ -226,6 +309,7 @@ class _PdfWriter:
 
     def _new_page(self) -> None:
         self._page_streams.append(bytearray())
+        self._page_xobjects.append({})
         self._cursor_y = PAGE_H - MARGIN_T
 
     # --- Save --------------------------------------------------------------
@@ -263,11 +347,14 @@ class _PdfWriter:
 
         page_obj_nos: List[int] = []
         content_obj_nos: List[int] = []
-        for stream in self._page_streams:
+        for idx, stream in enumerate(self._page_streams):
             content_no = self._reserve()
             page_no = self._reserve()
             self._set(content_no, _content_obj(content_no, bytes(stream)))
-            self._set(page_no, _page_obj(page_no, pages_no, content_no, f1, f2, f3, f4, font_dict_extra))
+            xobjects = self._page_xobjects[idx] if idx < len(self._page_xobjects) else {}
+            self._set(page_no, _page_obj(page_no, pages_no, content_no,
+                                          f1, f2, f3, f4, font_dict_extra,
+                                          xobjects))
             page_obj_nos.append(page_no)
             content_obj_nos.append(content_no)
 
@@ -464,9 +551,71 @@ def _content_obj(num: int, stream: bytes) -> bytes:
 
 
 def _page_obj(num: int, parent: int, content: int,
-              f1: int, f2: int, f3: int, f4: int, extra_fonts: str) -> bytes:
+              f1: int, f2: int, f3: int, f4: int, extra_fonts: str,
+              xobjects: dict[str, int] | None = None) -> bytes:
+    xo_dict = ""
+    if xobjects:
+        xo_entries = " ".join(f"/{name} {obj_no} 0 R"
+                                for name, obj_no in xobjects.items())
+        xo_dict = f" /XObject << {xo_entries} >>"
     return (
         f"{num} 0 obj\n<< /Type /Page /Parent {parent} 0 R /Contents {content} 0 R "
-        f"/Resources << /Font << /F1 {f1} 0 R /F2 {f2} 0 R /F3 {f3} 0 R /F4 {f4} 0 R{extra_fonts} >> >> "
+        f"/Resources << /Font << /F1 {f1} 0 R /F2 {f2} 0 R /F3 {f3} 0 R /F4 {f4} 0 R{extra_fonts} >>"
+        f"{xo_dict} >> "
         f">>\nendobj\n"
     ).encode("latin-1")
+
+
+# ---------------------------------------------------------------------------
+# Image format helpers (JPEG dim parsing + cheap dim peek for cache hits)
+# ---------------------------------------------------------------------------
+
+def _parse_jpeg_dims(data: bytes) -> tuple[int, int, int, int]:
+    """Parse a JPEG byte string and return (width, height, bits_per_sample,
+    components). Walks SOI → segments until a SOFn marker (Start of Frame).
+    Raises ValueError if not a JPEG or no SOF found."""
+    if data[:2] != b"\xff\xd8":
+        raise ValueError("Not a JPEG (missing SOI marker)")
+    i = 2
+    while i + 4 <= len(data):
+        if data[i] != 0xff:
+            raise ValueError(f"Bad JPEG segment marker at offset {i}")
+        # Skip 0xff fill bytes
+        while i < len(data) and data[i] == 0xff:
+            i += 1
+        if i >= len(data):
+            break
+        marker = data[i]
+        i += 1
+        # SOFn markers (excluding SOF4=DHT and SOF8=JPG and DAC=0xCC):
+        # 0xC0..0xCF except C4, C8, CC are Start-of-Frame markers
+        if 0xc0 <= marker <= 0xcf and marker not in (0xc4, 0xc8, 0xcc):
+            # SOF body: length(2) + bps(1) + height(2) + width(2) + components(1)
+            length = (data[i] << 8) | data[i + 1]
+            bps = data[i + 2]
+            h = (data[i + 3] << 8) | data[i + 4]
+            w = (data[i + 5] << 8) | data[i + 6]
+            comps = data[i + 7]
+            return w, h, bps, comps
+        # Non-SOF segment: skip its length
+        if marker in (0x01,) or 0xd0 <= marker <= 0xd9:
+            # Markers without payload (RSTn, SOI, EOI)
+            continue
+        if i + 2 > len(data):
+            break
+        length = (data[i] << 8) | data[i + 1]
+        i += length
+    raise ValueError("No SOF marker found in JPEG")
+
+
+def _peek_image_dims(data: bytes, mime: str) -> tuple[int, int]:
+    """Cheap width/height extraction for cache hits where we only need dims.
+    Uses _parse_jpeg_dims for JPEG and Pillow for everything else."""
+    mime = (mime or "").lower()
+    if mime == "image/jpeg":
+        w, h, _bps, _comps = _parse_jpeg_dims(data)
+        return w, h
+    from PIL import Image as PILImage
+    from io import BytesIO
+    img = PILImage.open(BytesIO(data))
+    return img.size

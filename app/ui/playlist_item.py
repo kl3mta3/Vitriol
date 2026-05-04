@@ -114,13 +114,16 @@ class PlaylistItemWidget(QWidget):
         self.over_checkbox.toggled.connect(self._toggle_save_field)
         layout.addWidget(self.over_checkbox)
 
-        # 7. Save location field
+        # 7. Save location field — stretches to fill remaining width.
+        # Path text is ellipsized when the field is too narrow; full path
+        # appears as tooltip on hover. Stretch factor 1 keeps it taking
+        # the bulk of the row's free space.
         self.save_field = QLineEdit()
         self.save_field.setReadOnly(True)
-        self.save_field.setText(str(self._default_save_dir()))
         self.save_field.setMinimumWidth(180)
         self.save_field.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_field.mousePressEvent = self._pick_dir  # type: ignore[assignment]
+        self._set_save_field_path(str(self._default_save_dir()))
         layout.addWidget(self.save_field, 1)
 
         # 8. Convert / Stop button
@@ -129,7 +132,7 @@ class PlaylistItemWidget(QWidget):
         self.convert_btn.clicked.connect(self._on_convert_or_stop)
         layout.addWidget(self.convert_btn)
 
-        # 9. Time display
+        # 9. Time display — simple "elapsed / estimated" format.
         self.time_label = QLabel("--:-- / --:--")
         self.time_label.setObjectName("Muted")
         self.time_label.setMinimumWidth(80)
@@ -168,7 +171,11 @@ class PlaylistItemWidget(QWidget):
         target_ext = self.target_ext() or ".out"
         if self.over_checkbox.isChecked():
             return self.path.with_suffix(target_ext)
-        save_dir = Path(self.save_field.text())
+        # Use the FULL path stashed by _set_save_field_path — save_field.text()
+        # may be elided (contains '…' for long paths) which would create a
+        # literal '…'-named directory and silently misroute the output.
+        full = getattr(self, "_full_save_path", None) or self.save_field.text()
+        save_dir = Path(full)
         save_dir.mkdir(parents=True, exist_ok=True)
         return save_dir / (self.path.stem + target_ext)
 
@@ -250,7 +257,17 @@ class PlaylistItemWidget(QWidget):
         Skipped if the user has manually picked a folder via _pick_dir."""
         if self._save_dir_overridden:
             return
-        self.save_field.setText(str(self._default_save_dir()))
+        self._set_save_field_path(str(self._default_save_dir()))
+
+    def _set_save_field_path(self, path: str) -> None:
+        """Store the full path on the widget + tooltip; show an elided form
+        in the field text since save_field's display width is narrow now."""
+        self._full_save_path = path
+        self.save_field.setToolTip(path)
+        fm = QFontMetrics(self.save_field.font())
+        elided = fm.elidedText(path, Qt.TextElideMode.ElideMiddle,
+                                max(60, self.save_field.width() - 16))
+        self.save_field.setText(elided)
 
     def _on_target_changed(self, _new_text: str) -> None:
         self._refresh_save_field()
@@ -259,9 +276,10 @@ class PlaylistItemWidget(QWidget):
         self.save_field.setVisible(not checked)
 
     def _pick_dir(self, _event) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Choose output folder", self.save_field.text())
+        current = getattr(self, "_full_save_path", self.save_field.text())
+        d = QFileDialog.getExistingDirectory(self, "Choose output folder", current)
         if d:
-            self.save_field.setText(d)
+            self._set_save_field_path(d)
             # User has chosen explicitly — stop auto-deriving on target changes.
             self._save_dir_overridden = True
 
@@ -281,6 +299,13 @@ class PlaylistItemWidget(QWidget):
         else:
             total = "--:--"
         self.time_label.setText(f"{elapsed} / {total}")
+
+    def update_bytes_progress(self, processed: int, total: int) -> None:
+        """No-op stub. The bytes_progress signal is still emitted by the
+        queue (kept for any future use), but the time_label stays in the
+        simple `elapsed / estimated` format produced by _update_time_label.
+        Left as a stub so MainWindow's wire-up doesn't have to change."""
+        return
 
 
 def _fmt_secs(s: float) -> str:

@@ -17,6 +17,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QRunnable, Signal, QThreadPool, Slot
 
 from .router import convert_file, UnsupportedConversionError
+from .config import PROGRESS_EMIT_THROTTLE_MS
 from ..utils.cancellation import CancellationToken, CancelledError
 from ..utils.logger import get_logger
 from ..utils.paths import unique_path
@@ -32,6 +33,7 @@ class JobSignals(QObject):
     failed = Signal(int, str)              # job_id, error message
     cancelled = Signal(int)                # job_id
     warning = Signal(int, str)             # job_id, human-readable warning
+    bytes_progress = Signal(int, int, int) # job_id, processed_bytes, total_bytes
 
 
 @dataclass
@@ -44,6 +46,7 @@ class Job:
     save_over_original: bool
     masquerade: bool = False
     verify_round_trip: bool = False
+    total_bytes: int = 0   # populated at submit() from src.stat().st_size
     cancel: CancellationToken = field(default_factory=CancellationToken)
 
 
@@ -60,17 +63,32 @@ class _Runnable(QRunnable):
         sig = self.signals
         sig.started.emit(job.id)
         start = time.monotonic()
+        # Throttle bytes_progress to one emit per PROGRESS_EMIT_THROTTLE_MS
+        # so giant streaming conversions don't spam the UI thread.
+        last_bytes_emit = [0.0]
 
         def emit_elapsed() -> None:
             sig.elapsed.emit(job.id, time.monotonic() - start)
+
+        def emit_bytes(p: float) -> None:
+            if job.total_bytes <= 0:
+                return
+            now = time.monotonic()
+            # Always emit at p==1.0 (final) so the UI lands on the exact total.
+            if p >= 0.999 or (now - last_bytes_emit[0]) * 1000 >= PROGRESS_EMIT_THROTTLE_MS:
+                last_bytes_emit[0] = now
+                processed = int(min(1.0, max(0.0, p)) * job.total_bytes)
+                sig.bytes_progress.emit(job.id, processed, job.total_bytes)
 
         def on_progress(p: float) -> None:
             emit_elapsed()
             # When verifying, forward progress is shown as the first half.
             if job.verify_round_trip:
-                sig.progress.emit(job.id, p * 0.5)
+                shown = p * 0.5
             else:
-                sig.progress.emit(job.id, p)
+                shown = p
+            sig.progress.emit(job.id, shown)
+            emit_bytes(shown)
 
         dst = job.dst if job.save_over_original else unique_path(job.dst)
         warnings: list[str] = []
@@ -129,7 +147,15 @@ class _Runnable(QRunnable):
             # Reverse direction (50% → 95% of progress band)
             def rev_progress(p: float) -> None:
                 emit_elapsed()
-                sig.progress.emit(job.id, 0.5 + p * 0.45)
+                shown = 0.5 + p * 0.45
+                sig.progress.emit(job.id, shown)
+                # Inline byte-progress emit (same throttle window as forward).
+                if job.total_bytes > 0:
+                    now = time.monotonic()
+                    if shown >= 0.95 or (now - last_bytes_emit[0]) * 1000 >= PROGRESS_EMIT_THROTTLE_MS:
+                        last_bytes_emit[0] = now
+                        processed = int(min(1.0, max(0.0, shown)) * job.total_bytes)
+                        sig.bytes_progress.emit(job.id, processed, job.total_bytes)
 
             rev_warnings: list[str] = []
             convert_file(tmp_forward, tmp_reverse, job.dst_ext, job.src_ext,
@@ -210,6 +236,7 @@ class ConversionQueue(QObject):
     job_failed = Signal(int, str)
     job_cancelled = Signal(int)
     job_warning = Signal(int, str)
+    job_bytes_progress = Signal(int, int, int)  # job_id, processed, total
 
     def __init__(self, max_workers: int = 3, parent=None) -> None:
         super().__init__(parent)
@@ -225,6 +252,7 @@ class ConversionQueue(QObject):
         self._signals.failed.connect(self._on_failed)
         self._signals.cancelled.connect(self._on_cancelled)
         self._signals.warning.connect(self.job_warning)
+        self._signals.bytes_progress.connect(self.job_bytes_progress)
 
     def submit(
         self,
@@ -240,12 +268,17 @@ class ConversionQueue(QObject):
         self._next_id += 1
         token = CancellationToken()
         self._tokens[job_id] = token
+        try:
+            total_bytes = src.stat().st_size
+        except OSError:
+            total_bytes = 0
         job = Job(
             id=job_id, src=src, dst=dst,
             src_ext=src_ext, dst_ext=dst_ext,
             save_over_original=save_over_original,
             masquerade=masquerade,
             verify_round_trip=verify_round_trip,
+            total_bytes=total_bytes,
             cancel=token,
         )
         runnable = _Runnable(job, self._signals)

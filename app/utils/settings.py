@@ -1,31 +1,25 @@
 """Persisted user settings.
 
-JSON file at %LOCALAPPDATA%/Transmute/settings.json (Windows) or
-~/.local/share/Transmute/settings.json (other). Loaded once, written
-on every change.
+JSON file at user_data_dir() / settings.json. Path delegated to paths.py
+so all per-user data lives under a single root (AppData on Windows,
+~/.local/share on other OSes). Loaded once, written on every change.
 
 Keep the schema small — settings here are global app state that survives
 across sessions (toggle states, last-used save folders, etc.).
 """
 from __future__ import annotations
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from .logger import get_logger
+from .paths import settings_file
 
 _log = get_logger()
 
 
 def _settings_path() -> Path:
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    p = Path(base) / "Transmute"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / "settings.json"
+    return settings_file()
 
 
 _DEFAULTS: dict[str, Any] = {

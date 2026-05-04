@@ -52,75 +52,15 @@ def write(doc, path: Path, ext: str, cancel: CancellationToken) -> None:
         else:
             doc = plain_to_textdoc(str(doc))
 
-    # Bundle layout: when doc carries embedded images, create
-    # <parent>/<stem>/<stem>.md + <parent>/<stem>/images/* and render
-    # markdown with relative image references. Flat output otherwise.
-    images = _collect_images(doc)
-    if images:
-        _write_bundle(doc, path, images)
-    else:
-        path.write_text(render(doc), encoding="utf-8")
-
-
-def _collect_images(doc: TextDoc) -> list:
-    out: list = []
-    def visit(blocks):
-        for b in blocks:
-            if isinstance(b, Image) and b.data:
-                out.append(b)
-            elif isinstance(b, List_):
-                for item in b.items:
-                    visit(item)
-            elif isinstance(b, Blockquote):
-                visit(b.blocks)
-            elif isinstance(b, Table):
-                for row in b.rows:
-                    for cell in row:
-                        visit(cell)
-    visit(doc.blocks)
-    return out
-
-
-def _ext_for_mime(mime: str) -> str:
-    return {
-        "image/png": ".png",
-        "image/jpeg": ".jpg",
-        "image/jpg": ".jpg",
-        "image/gif": ".gif",
-        "image/webp": ".webp",
-        "image/bmp": ".bmp",
-        "image/tiff": ".tiff",
-        "image/svg+xml": ".svg",
-    }.get((mime or "").lower(), ".png")
-
-
-def _write_bundle(doc: TextDoc, path: Path, images: list) -> None:
-    """Write `<parent>/<stem>/<stem>.md` + an images/ subfolder. If the
-    bundle directory already exists, suffix it (foo, foo (1), foo (2), …)."""
-    from ..utils.paths import unique_path
-    bundle_dir = path.parent / path.stem
-    if bundle_dir.exists():
-        # unique_path works on files; adapt for directories
-        i = 1
-        while True:
-            cand = path.parent / f"{path.stem} ({i})"
-            if not cand.exists():
-                bundle_dir = cand
-                break
-            i += 1
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    img_dir = bundle_dir / "images"
-    img_dir.mkdir(exist_ok=True)
-    # Assign each image a stable filename and rewrite the Image.alt slot
-    # we use as an internal href marker — actually we annotate via a side map.
-    href_map: dict[int, str] = {}
-    for n, img in enumerate(images, 1):
-        ext = _ext_for_mime(img.mime)
-        fname = f"image{n}{ext}"
-        (img_dir / fname).write_bytes(img.data)
-        href_map[id(img)] = f"images/{fname}"
-    md_path = bundle_dir / path.name
-    md_path.write_text(render(doc, image_hrefs=href_map), encoding="utf-8")
+    # Bundle layout when images are present: <parent>/<stem>/<stem>.md +
+    # <parent>/<stem>/images/imageN.<ext>. Flat output otherwise.
+    # bundle_writer mutates each Image's href to "images/<name>"; the
+    # markdown render reads Image.href when emitting `![alt](href)`.
+    from ..core.bundle_writer import write_with_bundle
+    write_with_bundle(
+        doc, path,
+        flat_render=lambda d, p: p.write_text(render(d), encoding="utf-8"),
+    )
 
 
 def _resolve_image_refs(doc: TextDoc, md_path: Path) -> None:

@@ -1,4 +1,23 @@
-"""Path utilities. Output directories, app data dir, read-only-install fallback for ./bin/."""
+"""Path utilities for an installer-friendly layout.
+
+Three logical roots:
+
+  app_root()        — where the executable / main.py lives. READ-ONLY when
+                      the app is installed under Program Files. Holds the
+                      bundled, immutable assets (SVGs, icons, theme.qss).
+
+  user_data_dir()   — %LOCALAPPDATA%/Transmute on Windows; equivalent
+                      XDG_DATA_HOME path on Linux/macOS. Holds writable,
+                      auto-fetched assets (FFmpeg, Assimp, fonts, hw cache)
+                      plus settings + logs. Survives app updates cleanly.
+
+  docs_dir()        — %USERPROFILE%/Documents/Transmute on Windows; ~/Documents
+                      equivalent elsewhere. Holds conversion OUTPUT — the
+                      one place the end-user expects to find their files.
+
+Environment overrides (set by launcher.py so its subprocess agrees):
+  UC_BIN_DIR, UC_HW_CACHE, UC_RESOURCES_DIR, UC_USER_DATA_DIR, UC_DOCS_DIR.
+"""
 from __future__ import annotations
 import os
 import sys
@@ -12,16 +31,53 @@ CATEGORY_MODELS = "Models"
 ALL_CATEGORIES = (CATEGORY_TEXT, CATEGORY_AUDIO, CATEGORY_VIDEO, CATEGORY_IMAGES, CATEGORY_MODELS)
 
 
+# ---------------------------------------------------------------------------
+# Roots
+# ---------------------------------------------------------------------------
+
 def app_root() -> Path:
-    """Directory where the app lives (next to main.py, or alongside the PyInstaller exe)."""
+    """Directory where the app lives (next to main.py, or alongside a
+    PyInstaller exe). Treated as read-only at runtime — never write here."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent.parent
 
 
-def _local_app_data() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return Path(base) / "Transmute"
+def user_data_dir() -> Path:
+    """Per-user writable dir for everything the app generates or downloads.
+    Auto-created if missing. Honors UC_USER_DATA_DIR override."""
+    env = os.environ.get("UC_USER_DATA_DIR")
+    if env:
+        p = Path(env)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    p = Path(base) / "Transmute"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def docs_dir() -> Path:
+    """User's Documents/Transmute folder — default destination for converted
+    output. Auto-created. Honors UC_DOCS_DIR override (used by tests)."""
+    env = os.environ.get("UC_DOCS_DIR")
+    if env:
+        p = Path(env)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    if os.name == "nt":
+        # Resolve "My Documents" via USERPROFILE — works for OneDrive-redirected
+        # Documents too because OneDrive updates the path Windows uses.
+        userprofile = os.environ.get("USERPROFILE") or str(Path.home())
+        base = Path(userprofile) / "Documents"
+    else:
+        base = Path.home() / "Documents"
+    p = base / "Transmute"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _is_writable(p: Path) -> bool:
@@ -35,25 +91,24 @@ def _is_writable(p: Path) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Per-purpose directories
+# ---------------------------------------------------------------------------
+
 def bin_dir() -> Path:
-    """Where FFmpeg / Assimp DLL live. Falls back to %LOCALAPPDATA% if ./bin is read-only.
-    Honors UC_BIN_DIR (set by launcher.py) so the subprocess agrees with where
-    the launcher installed the binaries."""
+    """Where FFmpeg / Assimp DLL live. Always under user_data_dir() so the
+    same code path works for portable (zip) AND installed (Program Files)
+    deployments. Honors UC_BIN_DIR override for cases where someone wants
+    to point at a system-wide install."""
     env = os.environ.get("UC_BIN_DIR")
     if env:
-        p = Path(env)
-        if _is_writable(p):
-            return p
-    local = app_root() / "bin"
-    if _is_writable(local):
-        return local
-    fallback = _local_app_data() / "bin"
-    fallback.mkdir(parents=True, exist_ok=True)
-    return fallback
+        return Path(env)
+    p = user_data_dir() / "bin"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def hw_encoder_cache() -> Path:
-    """Path to the JSON file the launcher wrote with hardware encoder probe results."""
     env = os.environ.get("UC_HW_CACHE")
     if env:
         return Path(env)
@@ -61,10 +116,14 @@ def hw_encoder_cache() -> Path:
 
 
 def wheels_dir() -> Path:
+    """Optional offline pip wheel cache. Read-only at runtime — beside the
+    app for portable installs, ignored if absent."""
     return app_root() / "wheels"
 
 
 def resources_dir() -> Path:
+    """Bundled, immutable assets (SVGs, icons, theme.qss). Read-only.
+    UC_RESOURCES_DIR override is honored for tests / unusual layouts."""
     env = os.environ.get("UC_RESOURCES_DIR")
     if env:
         p = Path(env)
@@ -73,24 +132,77 @@ def resources_dir() -> Path:
     return app_root() / "resources"
 
 
-def output_dir(category: str) -> Path:
-    """Default output dir for a category. Created on demand."""
-    if category not in ALL_CATEGORIES:
-        category = CATEGORY_TEXT
-    p = app_root() / "output" / category
-    if not _is_writable(p):
-        p = _local_app_data() / "output" / category
+def font_dir() -> Path:
+    """Auto-fetched fonts (DejaVu, Cinzel). Lives under user_data_dir() so
+    the launcher can write here regardless of where the app is installed."""
+    p = user_data_dir() / "fonts"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
+def find_font(filename: str) -> Path | None:
+    """Return the on-disk path for a bundled font file. Checks user font_dir
+    first (where the launcher writes auto-fetched files), then the bundled
+    resources/ tree as a fallback. Returns None if not found anywhere."""
+    candidates = (
+        font_dir() / filename,
+        resources_dir() / "fonts" / filename,
+        resources_dir() / filename,    # legacy: DejaVu was at resources root
+    )
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def output_dir(category: str) -> Path:
+    """Default output dir for a category. Documents/Transmute/<Category>.
+    Auto-created. Falls back to user_data_dir()/output/<Category> only if
+    Documents is somehow not writable (extremely rare — locked-down kiosk)."""
+    if category not in ALL_CATEGORIES:
+        category = CATEGORY_TEXT
+    primary = docs_dir() / category
+    if _is_writable(primary):
+        return primary
+    fallback = user_data_dir() / "output" / category
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
 def log_file() -> Path:
-    base = app_root() / "logs"
-    if not _is_writable(base):
-        base = _local_app_data() / "logs"
+    base = user_data_dir() / "logs"
     base.mkdir(parents=True, exist_ok=True)
     return base / "transmute.log"
 
+
+def settings_file() -> Path:
+    """Persisted user settings — under user_data_dir() so it survives reinstalls."""
+    return user_data_dir() / "settings.json"
+
+
+# ---------------------------------------------------------------------------
+# First-run scaffold
+# ---------------------------------------------------------------------------
+
+def ensure_user_dirs() -> None:
+    """Create every directory the app needs to write to. Idempotent — safe
+    to call on every launch. Called by launcher.py before main.py spawns."""
+    user_data_dir()             # AppData root
+    bin_dir()
+    font_dir()
+    log_file().parent
+    docs_dir()
+    for cat in ALL_CATEGORIES:
+        try:
+            (docs_dir() / cat).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Documents not writable — fall back will kick in lazily.
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
 
 def unique_path(target: Path) -> Path:
     """If target exists, append ' (1)', ' (2)', ... before the suffix until unique."""

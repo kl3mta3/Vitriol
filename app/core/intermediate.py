@@ -212,3 +212,34 @@ ADAPTERS = {
         plain_to_textdoc(b.decode("utf-8", errors="replace") if isinstance(b, (bytes, bytearray)) else str(b))
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Cross-category adapter: image bytes → TextDoc with a single Image block.
+# Lets the router treat image sources as legitimate inputs for document
+# writers (pdf_write, markdown_parser, text_plain). Each writer renders the
+# Image block however it likes — pdf_write embeds it as an /XObject /Image,
+# markdown_parser writes a bundle layout with the image saved alongside,
+# text_plain falls back to a "[image]" placeholder.
+# ---------------------------------------------------------------------------
+
+_EXT_TO_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff", ".tif": "image/tiff",
+    ".heic": "image/heic", ".heif": "image/heic",
+    ".svg": "image/svg+xml",
+}
+
+
+def image_bytes_to_textdoc(src_bytes: bytes, src_ext: str, alt: str = "") -> TextDoc:
+    """Wrap a raster image as a single-block TextDoc. Used by the router
+    when the source is an image and the target is a document format."""
+    ext = src_ext.lower()
+    if not ext.startswith("."):
+        ext = "." + ext
+    mime = _EXT_TO_MIME.get(ext, "image/png")
+    return TextDoc(blocks=[Image(data=src_bytes, mime=mime, alt=alt or f"image{ext}")])

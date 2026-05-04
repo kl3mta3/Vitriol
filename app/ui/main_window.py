@@ -23,8 +23,9 @@ def _ensure_cinzel_loaded() -> str | None:
     global _CINZEL_FAMILY
     if _CINZEL_FAMILY is not None:
         return _CINZEL_FAMILY
-    ttf = resources_dir() / "fonts" / "Cinzel-Regular.ttf"
-    if not ttf.exists():
+    from ..utils.paths import find_font
+    ttf = find_font("Cinzel-Regular.ttf")
+    if ttf is None:
         return None
     font_id = QFontDatabase.addApplicationFont(str(ttf))
     if font_id < 0:
@@ -247,13 +248,13 @@ class MainWindow(QMainWindow):
         self.btn_clear.clicked.connect(self._on_clear)
 
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("Ready.")
-        # Push the status bar text up so the inscribed BorderFrame's bottom
-        # edge sits well BELOW "Ready." with clear space between them.
-        # Left margin keeps the text from clipping the left border line;
-        # bottom margin nudges the text upward inside the bar.
-        self.statusBar().setContentsMargins(18, 0, 0, 35)
-        self.statusBar().setMinimumHeight(52)
+        # Make the status bar tall enough that the "Ready." text sits well
+        # above the inscribed BorderFrame's bottom edge. Bottom padding is
+        # set in theme.qss; horizontal padding goes via leading-space prefix
+        # in _status() because QStatusBar paints showMessage() text in its
+        # own paintEvent and ignores QSS padding-left for the message label.
+        self.statusBar().setMinimumHeight(64)
+        self._status("Ready.")
 
         # Inscribed manuscript border + vignette parented to the QMainWindow
         # itself so they wrap the entire window including the status bar.
@@ -275,6 +276,21 @@ class MainWindow(QMainWindow):
         self._queue.job_failed.connect(self._on_job_failed)
         self._queue.job_cancelled.connect(self._on_job_cancelled)
         self._queue.job_warning.connect(self._on_job_warning)
+        self._queue.job_bytes_progress.connect(self._on_job_bytes_progress)
+
+    def _on_job_bytes_progress(self, job_id: int, processed: int, total: int) -> None:
+        w = self._job_to_widget.get(job_id)
+        if w is not None:
+            w.update_bytes_progress(processed, total)
+
+    def _status(self, msg: str, timeout: int = 0) -> None:
+        """Show a status-bar message with leading-space indent so the text
+        clears the inscribed left border. Qt's QStatusBar paints showMessage
+        text in its own paintEvent and ignores QSS padding-left, so prefix
+        is the reliable way to push the text right."""
+        # 4 spaces ≈ 20 px at the default UI font — matches what padding-left
+        # would have done if QStatusBar honored it.
+        self.statusBar().showMessage("    " + msg, timeout)
 
     def _on_playlist_changed(self) -> None:
         """Fade the drop-zone watermark up (empty) or down (non-empty)."""
@@ -295,7 +311,7 @@ class MainWindow(QMainWindow):
             w.convert_requested.connect(self._start_convert)
             w.stop_requested.connect(self._stop_convert)
             w._signals_wired = True
-        self.statusBar().showMessage(f"Added {len(paths)} item(s).")
+        self._status(f"Added {len(paths)} item(s).")
 
     # --- Per-item ----------------------------------------------------------
     def _start_convert(self, widget: PlaylistItemWidget) -> None:
@@ -305,11 +321,31 @@ class MainWindow(QMainWindow):
         if not target_ext or not target_ext.startswith("."):
             dialogs.error(self, "Cannot convert", f"No valid target format for {widget.path.name}.")
             return
+        masq = bool(self.chk_stone.isChecked())
+        verify = bool(self.chk_verify.isChecked() and self.chk_verify.isEnabled())
+        # Verify Round-Trip warning — only fires when estimated wall-clock
+        # exceeds the LONG_CONVERSION_SECONDS threshold (10 min). Per-item
+        # _verify_warned flag prevents re-prompting on retries.
+        if verify and not getattr(widget, "_verify_warned", False):
+            from ..core.estimator import estimate_verify_seconds, LONG_CONVERSION_SECONDS
+            try:
+                src_size = widget.path.stat().st_size
+            except OSError:
+                src_size = 0
+            secs = estimate_verify_seconds(widget.src_ext, target_ext, src_size, masq)
+            if secs > LONG_CONVERSION_SECONDS:
+                mins = int(round(secs / 60))
+                if not dialogs.confirm(
+                    self,
+                    "Verify Round-Trip — long conversion",
+                    f"Verifying this conversion will take ~{mins} extra minutes "
+                    "(round-trip doubles conversion time). Continue with verification?",
+                ):
+                    return
+            widget._verify_warned = True
         widget.reset_for_rerun()
         widget.set_status(Status.RUNNING)
         out = widget.output_path()
-        masq = bool(self.chk_stone.isChecked())
-        verify = bool(self.chk_verify.isChecked() and self.chk_verify.isEnabled())
         job_id = self._queue.submit(
             src=widget.path,
             dst=out,
@@ -329,7 +365,7 @@ class MainWindow(QMainWindow):
         # cross-category byte-passthrough hosts.
         for w in self.playlist.items():
             w.refresh_targets(masquerade=checked)
-        self.statusBar().showMessage(
+        self._status(
             "Philosopher's Stone " + ("ON — lossless byte-passthrough hosts available."
                                       if checked else "OFF.")
         )
@@ -366,11 +402,51 @@ class MainWindow(QMainWindow):
                 break
 
     # --- Bulk --------------------------------------------------------------
+    def _bulk_verify_preflight(self, items: list[PlaylistItemWidget]) -> bool:
+        """Aggregate the Verify Round-Trip estimate across all queued items
+        and prompt once. Returns True if conversion should proceed (verify
+        either off, total under threshold, or user confirmed). Marks each
+        widget so the per-item warning won't fire again for this batch."""
+        verify = bool(self.chk_verify.isChecked() and self.chk_verify.isEnabled())
+        if not verify:
+            return True
+        from ..core.estimator import estimate_verify_seconds, LONG_CONVERSION_SECONDS
+        masq = bool(self.chk_stone.isChecked())
+        total = 0.0
+        eligible = []
+        for w in items:
+            if w.is_running() or w.status() == Status.DONE:
+                continue
+            ext = w.target_ext()
+            if not ext:
+                continue
+            try:
+                size = w.path.stat().st_size
+            except OSError:
+                size = 0
+            total += estimate_verify_seconds(w.src_ext, ext, size, masq)
+            eligible.append(w)
+        if total > LONG_CONVERSION_SECONDS and eligible:
+            mins = int(round(total / 60))
+            if not dialogs.confirm(
+                self, "Verify Round-Trip — long batch",
+                f"Verifying {len(eligible)} item(s) will take ~{mins} extra minutes total "
+                "(round-trip doubles each conversion). Continue with verification?",
+            ):
+                return False
+        # Stamp _verify_warned on every eligible widget so per-row prompts
+        # don't fire again inside _start_convert.
+        for w in eligible:
+            w._verify_warned = True
+        return True
+
     def _on_convert_all(self) -> None:
         items = self.playlist.items()
         if not items:
             return
         if not dialogs.confirm(self, "Convert all?", f"Convert all {len(items)} item(s) in the playlist?"):
+            return
+        if not self._bulk_verify_preflight(items):
             return
         for w in items:
             if not w.is_running() and w.status() != Status.DONE:
@@ -382,6 +458,8 @@ class MainWindow(QMainWindow):
             dialogs.info(self, "Nothing selected", "Tick the checkboxes of items you want to convert.")
             return
         if not dialogs.confirm(self, "Convert selected?", f"Convert {len(items)} selected item(s)?"):
+            return
+        if not self._bulk_verify_preflight(items):
             return
         for w in items:
             if not w.is_running():
@@ -430,27 +508,27 @@ class MainWindow(QMainWindow):
         if w:
             w.set_progress(1.0)
             w.set_status(Status.DONE)
-        self.statusBar().showMessage(f"Saved: {path}")
+        self._status(f"Saved: {path}")
 
     def _on_job_failed(self, job_id: int, msg: str) -> None:
         w = self._job_to_widget.pop(job_id, None)
         if w:
             w.set_status(Status.ERROR, msg)
-        self.statusBar().showMessage(f"Error: {msg}")
+        self._status(f"Error: {msg}")
 
     def _on_job_warning(self, job_id: int, msg: str) -> None:
         w = self._job_to_widget.get(job_id)
         if w:
             existing = w.title.toolTip()
             w.title.setToolTip(existing + ("\n" if existing else "") + "Warning: " + msg)
-        self.statusBar().showMessage("Warning: " + msg, 8000)
+        self._status("Warning: " + msg, 8000)
 
     def _on_job_cancelled(self, job_id: int) -> None:
         w = self._job_to_widget.pop(job_id, None)
         if w:
             w.set_status(Status.QUEUED)
             w.set_progress(0.0)
-        self.statusBar().showMessage("Cancelled.")
+        self._status("Cancelled.")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self._queue.cancel_all()

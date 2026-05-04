@@ -52,40 +52,20 @@ except Exception:
 # Paths
 # ---------------------------------------------------------------------------
 
-def _app_root() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent
+# Paths come from app.utils.paths — pure-stdlib module, no PySide6/Pillow
+# needed, so importing here (before pip-install runs) is safe. Keeping a
+# single source of truth means launcher and main app can never disagree
+# about where binaries / fonts / output should live.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from app.utils import paths as _paths   # noqa: E402
 
-
-ROOT = _app_root()
-BIN = ROOT / "bin"
-WHEELS = ROOT / "wheels"
-RESOURCES = ROOT / "resources"
-HW_CACHE = BIN / "hw_encoders.json"
-
-
-def _is_writable(p: Path) -> bool:
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-        probe = p / ".write_probe"
-        probe.write_bytes(b"")
-        probe.unlink()
-        return True
-    except OSError:
-        return False
-
-
-# Read-only install fallback for ./bin/ and ./resources/.
-if not _is_writable(BIN):
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    BIN = Path(base) / "Transmute" / "bin"
-    BIN.mkdir(parents=True, exist_ok=True)
-    HW_CACHE = BIN / "hw_encoders.json"
-if not _is_writable(RESOURCES):
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    RESOURCES = Path(base) / "Transmute" / "resources"
-    RESOURCES.mkdir(parents=True, exist_ok=True)
+ROOT = _paths.app_root()
+BIN = _paths.bin_dir()                  # %LOCALAPPDATA%/Transmute/bin
+WHEELS = _paths.wheels_dir()            # <app>/wheels (read-only, may not exist)
+RESOURCES = _paths.resources_dir()      # <app>/resources (bundled, read-only)
+FONTS = _paths.font_dir()               # %LOCALAPPDATA%/Transmute/fonts
+HW_CACHE = _paths.hw_encoder_cache()    # bin_dir()/hw_encoders.json
+USER_DATA = _paths.user_data_dir()      # %LOCALAPPDATA%/Transmute
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +76,8 @@ REQUIRED_PY = [
     ("PySide6", "PySide6>=6.6"),
     ("PIL", "Pillow>=10.0"),
     ("striprtf", "striprtf>=0.0.26"),
+    ("psutil", "psutil>=5.9"),
+    ("pdfminer", "pdfminer.six>=20221105"),
 ]
 
 
@@ -153,18 +135,25 @@ CINZEL_SHA = ""
 
 
 def _find_ffmpeg() -> Optional[Path]:
-    local = BIN / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    if local.exists():
-        return local
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    # Primary: user_data bin (where new installs land). Fallback: app-relative
+    # bin/ (where pre-refactor / portable installs may have it). Last: PATH.
+    for d in (BIN, ROOT / "bin"):
+        c = d / name
+        if c.exists():
+            return c
     found = shutil.which("ffmpeg")
     return Path(found) if found else None
 
 
 def _find_assimp() -> Optional[Path]:
-    for name in ("assimp-vc143-mt.dll", "assimp.dll", "libassimp.dll", "libassimp.so", "libassimp.dylib"):
-        c = BIN / name
-        if c.exists():
-            return c
+    names = ("assimp-vc143-mt.dll", "assimp.dll", "libassimp.dll",
+             "libassimp.so", "libassimp.dylib")
+    for d in (BIN, ROOT / "bin"):
+        for name in names:
+            c = d / name
+            if c.exists():
+                return c
     env = os.environ.get("ASSIMP_DLL") or os.environ.get("ASSIMP_PATH")
     if env and Path(env).exists():
         return Path(env)
@@ -173,13 +162,11 @@ def _find_assimp() -> Optional[Path]:
 
 
 def _find_dejavu() -> Optional[Path]:
-    p = RESOURCES / "DejaVuSans.ttf"
-    return p if p.exists() else None
+    return _paths.find_font("DejaVuSans.ttf")
 
 
 def _find_cinzel() -> Optional[Path]:
-    p = RESOURCES / "fonts" / "Cinzel-Regular.ttf"
-    return p if p.exists() else None
+    return _paths.find_font("Cinzel-Regular.ttf")
 
 
 def _download(url: str, dst: Path, expected_sha: str, log) -> bool:
@@ -273,36 +260,29 @@ def _install_assimp(log) -> bool:
 
 
 def _install_cinzel(log) -> bool:
-    """Fetch Cinzel-Regular.ttf into resources/fonts/. Direct .ttf download —
-    no zip wrapper. OFL license; safe to redistribute."""
+    """Fetch Cinzel-Regular.ttf into the user font dir. OFL-licensed."""
     log("Cinzel-Regular.ttf missing — fetching (UI title font)")
-    target_dir = RESOURCES / "fonts"
-    try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        log(f"  could not create {target_dir}: {e}")
-        return False
-    target = target_dir / "Cinzel-Regular.ttf"
+    target = FONTS / "Cinzel-Regular.ttf"
     if _download(CINZEL_URL, target, CINZEL_SHA, log):
-        log("  Cinzel-Regular.ttf installed")
+        log(f"  Cinzel-Regular.ttf installed to {target}")
         return True
     return False
 
 
 def _install_dejavu(log) -> bool:
     log("DejaVuSans.ttf missing — fetching (gives PDF output Unicode coverage)")
-    zip_path = RESOURCES / "dejavu-download.zip"
+    zip_path = FONTS / "dejavu-download.zip"
     try:
         if not _download(DEJAVU_URL, zip_path, DEJAVU_SHA, log):
             return False
-        target = RESOURCES / "DejaVuSans.ttf"
+        target = FONTS / "DejaVuSans.ttf"
         with zipfile.ZipFile(zip_path) as z:
             for n in z.namelist():
                 # The zip nests as dejavu-fonts-ttf-2.37/ttf/DejaVuSans.ttf
                 if n.lower().endswith("/ttf/dejavusans.ttf") or n.lower().endswith("dejavusans.ttf"):
                     with z.open(n) as src, open(target, "wb") as out:
                         shutil.copyfileobj(src, out)
-                    log("  DejaVuSans.ttf installed")
+                    log(f"  DejaVuSans.ttf installed to {target}")
                     return True
         log("  DejaVuSans.ttf not found inside downloaded archive")
         return False
@@ -447,6 +427,12 @@ class _ProgressUI:
 def main() -> int:
     ui = _ProgressUI()
     try:
+        # 0. First-run scaffold: create AppData/Transmute, Documents/Transmute,
+        #    and per-category output subfolders. Idempotent — safe on every run.
+        _paths.ensure_user_dirs()
+        ui.log(f"User data:  {_paths.user_data_dir()}")
+        ui.log(f"Output dir: {_paths.docs_dir()}")
+
         # 1. Python packages — auto-install, no prompt
         missing = _missing_python_packages()
         if missing:
@@ -494,6 +480,8 @@ def main() -> int:
     env["UC_BIN_DIR"] = str(BIN)
     env["UC_HW_CACHE"] = str(HW_CACHE)
     env["UC_RESOURCES_DIR"] = str(RESOURCES)
+    env["UC_USER_DATA_DIR"] = str(USER_DATA)
+    env["UC_DOCS_DIR"] = str(_paths.docs_dir())
     rc = subprocess.call([sys.executable, str(main_py)], env=env)
     return rc
 

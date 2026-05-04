@@ -1,20 +1,25 @@
-"""Render resources/logo.svg into PNG sizes + a multi-resolution Windows .ico.
+"""Render the Transmute logo SVGs into PNG sizes + multi-resolution .ico.
 
-Run once whenever logo.svg changes:
+Run once whenever any of the source SVGs changes:
     python tools/generate_icons.py
 
-Outputs:
-    resources/icons/logo-16.png
-    resources/icons/logo-32.png
-    resources/icons/logo-48.png
-    resources/icons/logo-64.png
-    resources/icons/logo-128.png
-    resources/icons/logo-256.png
-    resources/icons/logo-512.png
-    resources/icons/logo.ico    (embeds 16/32/48/64/128/256 frames)
+Inputs:
+    resources/logo.svg          (default — discs use #0a0a0f fill)
+    resources/logo-bg.svg       (background-baked variant)
+    resources/logo-outline.svg  (transparent / stroke-only variant)
 
-Uses QtSvg to rasterize (handles gradients and SVG features Pillow can't read
-on its own) and Pillow to assemble the .ico container.
+Outputs (in resources/icons/):
+    logo-{16,32,48,64,128,256,512}.png        + logo.ico
+    logo-bg-{16,32,48,64,128,256,512}.png     + logo-bg.ico
+    logo-outline-{16,32,48,64,128,256,512}.png
+
+Use logo-bg.* for the Windows window icon and any taskbar surface (it sits
+on its own dark background regardless of where it's composited). Use
+logo-outline.* when you want to drop the logo on top of a custom background
+of your own choice — its discs are transparent.
+
+Uses QtSvg to rasterize (handles gradients and SVG features Pillow can't
+read on its own) and Pillow to assemble the .ico container.
 """
 from __future__ import annotations
 import sys
@@ -48,39 +53,53 @@ def render_png(svg_path: Path, size: int) -> Image.Image:
     return Image.frombuffer("RGBA", (size, size), ptr, "raw", "RGBA", 0, 1)
 
 
-def main() -> int:
-    repo = Path(__file__).resolve().parent.parent
-    svg = repo / "resources" / "logo.svg"
-    if not svg.exists():
-        print(f"ERROR: {svg} not found", file=sys.stderr)
-        return 1
-
-    out_dir = repo / "resources" / "icons"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # QApplication needed for QtSvg rendering even in offscreen mode
-    app = QApplication.instance() or QApplication(sys.argv)
-
+def _render_one_variant(svg: Path, slug: str, out_dir: Path,
+                         emit_ico: bool) -> None:
     rendered: dict[int, Image.Image] = {}
     for size in sorted(set(PNG_SIZES + ICO_SIZES)):
         img = render_png(svg, size)
         rendered[size] = img
         if size in PNG_SIZES:
-            png_path = out_dir / f"logo-{size}.png"
+            png_path = out_dir / f"{slug}-{size}.png"
             img.save(png_path, format="PNG", optimize=True)
             print(f"  wrote {png_path.name} ({png_path.stat().st_size} bytes)")
+    if emit_ico:
+        base = rendered[max(ICO_SIZES)]
+        extra = [rendered[s] for s in ICO_SIZES if s != max(ICO_SIZES)]
+        ico_path = out_dir / f"{slug}.ico"
+        base.save(
+            ico_path,
+            format="ICO",
+            sizes=[(s, s) for s in ICO_SIZES],
+            append_images=extra,
+        )
+        print(f"  wrote {ico_path.name} ({ico_path.stat().st_size} bytes, {len(ICO_SIZES)} frames)")
 
-    # Multi-frame ICO
-    base = rendered[max(ICO_SIZES)]
-    extra = [rendered[s] for s in ICO_SIZES if s != max(ICO_SIZES)]
-    ico_path = out_dir / "logo.ico"
-    base.save(
-        ico_path,
-        format="ICO",
-        sizes=[(s, s) for s in ICO_SIZES],
-        append_images=extra,
-    )
-    print(f"  wrote {ico_path.name} ({ico_path.stat().st_size} bytes, {len(ICO_SIZES)} frames)")
+
+def main() -> int:
+    repo = Path(__file__).resolve().parent.parent
+    out_dir = repo / "resources" / "icons"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # (svg filename, output slug, emit .ico). All three emit .ico now;
+    # transparent backgrounds render correctly in Windows ICOs (the OS honors
+    # the alpha channel for taskbar/explorer composites).
+    variants = [
+        ("logo.svg",         "logo",         True),
+        ("logo-bg.svg",      "logo-bg",      True),
+        ("logo-outline.svg", "logo-outline", True),
+    ]
+
+    for svg_name, slug, emit_ico in variants:
+        svg = repo / "resources" / svg_name
+        if not svg.exists():
+            print(f"  skipping {svg_name} (not found)")
+            continue
+        print(f"--- {svg_name} -> {slug}-* ---")
+        _render_one_variant(svg, slug, out_dir, emit_ico)
+
     return 0
 
 

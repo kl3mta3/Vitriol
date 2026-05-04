@@ -1,29 +1,29 @@
-"""PDF text extraction — recoded from scratch against the ISO 32000-1 spec.
+"""PDF text + image extraction.
 
-Scope (intentionally narrow):
-  - Parses the cross-reference table (xref) — both classic and stream-based.
-  - Decompresses /Filter /FlateDecode streams (the dominant compression).
-  - Extracts text from page content streams via the Tj, TJ, ', " operators.
-  - Decodes character codes via /ToUnicode CMaps where present, otherwise
-    falls back to WinAnsi / MacRoman / standard-14 encoding tables (best-effort).
-  - Reconstructs paragraphs by clustering text by descending Y-coordinate.
+Two-tier strategy:
 
-Does NOT support:
-  - Encrypted PDFs (any /Encrypt entry → raises an error).
-  - LZW/CCITT/JBIG/DCT-only streams (image-only PDFs need OCR — out of v1).
-  - Form fields, annotations, layered content (OCGs).
-  - Right-to-left text reordering or vertical writing modes.
+  PRIMARY  — pdfminer.six. Mature 10+ year project that handles the long
+             tail of font-encoding edge cases (standard 14 fonts without
+             ToUnicode CMaps, /Differences overrides, CIDFonts, Type1
+             named glyphs via Adobe Glyph List, etc.). Also extracts
+             embedded image XObjects so PDF→MD/TXT can produce a folder
+             bundle with `images/`. Launcher auto-installs alongside the
+             other Python deps on first run.
 
-Real-world PDFs are messy; many won't fully extract. The handler returns the
-best plain-text approximation it can and never crashes the caller.
+  FALLBACK — the recoded extractor below. Pure-stdlib, parses xref +
+             FlateDecode + Tj/TJ operators + ToUnicode CMaps. Covers a
+             narrow subset (PDFs with embedded ToUnicode tables work,
+             standard-font PDFs typically come out as gibberish). Used
+             only when pdfminer.six can't be imported.
 """
 from __future__ import annotations
+import io
 import re
 import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from ..core.intermediate import Paragraph, Run, TextDoc
+from ..core.intermediate import Image, Paragraph, Run, TextDoc
 from ..utils.cancellation import CancellationToken
 from ..utils.logger import get_logger
 
@@ -35,25 +35,185 @@ DOC_KIND = "text"
 
 
 def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
+    """Try pdfminer.six first; fall back to the recoded extractor only if
+    pdfminer can't be imported (e.g. user ran main.py before the launcher's
+    pip install completed)."""
+    try:
+        import pdfminer  # noqa: F401  — just probing availability
+        doc = _extract_via_pdfminer(path, cancel)
+        _annotate_low_extraction_warning(doc, path)
+        return doc
+    except ImportError:
+        _log.warning(
+            "pdfminer.six unavailable — falling back to recoded extractor "
+            "(reduced quality). Run launcher.py to install dependencies."
+        )
+        return _read_recoded(path, cancel)
+    except Exception as e:
+        _log.exception("pdfminer extraction failed; falling back: %s", e)
+        doc = _read_recoded(path, cancel)
+        doc.metadata.setdefault("warnings", []).append(
+            f"Primary PDF extractor failed ({type(e).__name__}); used fallback. "
+            "Result may be incomplete."
+        )
+        return doc
+
+
+def _annotate_low_extraction_warning(doc: TextDoc, path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    total_chars = sum(len(r.text) for blk in doc.blocks
+                      if isinstance(blk, Paragraph) for r in blk.runs)
+    if size > 100_000 and total_chars < 50:
+        doc.metadata.setdefault("warnings", []).append(
+            "Limited text extracted — this PDF may be scanned, encrypted, "
+            "or contain text only as outlined shapes. Try opening it in a "
+            "PDF viewer first."
+        )
+
+
+# ============================================================
+# Primary extractor — pdfminer.six
+# ============================================================
+
+def _extract_via_pdfminer(path: Path, cancel: CancellationToken) -> TextDoc:
+    """Walk pages with pdfminer.high_level.extract_pages, emit Paragraph
+    blocks for each LTTextContainer and Image blocks for each LTImage.
+
+    Memory: pdfminer's extract_pages is a generator — pages stream one at a
+    time. We don't hold the whole document at any point.
+    """
+    from pdfminer.high_level import extract_pages
+    from pdfminer.layout import LTTextContainer, LTImage, LTFigure
+
+    blocks: List = []
+    images_seen = 0
+
+    def _walk_for_images(container) -> None:
+        """LTImages can be nested under LTFigure (or directly on the page).
+        Walk recursively, emit Image blocks for each LTImage we find."""
+        nonlocal images_seen
+        for child in container:
+            if isinstance(child, LTImage):
+                img_block = _ltimage_to_block(child, images_seen + 1)
+                if img_block is not None:
+                    blocks.append(img_block)
+                    images_seen += 1
+            elif isinstance(child, LTFigure):
+                _walk_for_images(child)
+
+    page_num = 0
+    for page_layout in extract_pages(str(path)):
+        cancel.check()
+        page_num += 1
+        for elem in page_layout:
+            if isinstance(elem, LTTextContainer):
+                text = elem.get_text()
+                # pdfminer returns text with line breaks intact; collapse runs
+                # of whitespace at line boundaries but preserve paragraph
+                # separation by splitting on blank lines.
+                for chunk in text.split("\n\n"):
+                    chunk = chunk.strip()
+                    if chunk:
+                        # Normalize internal newlines to spaces — paragraphs
+                        # usually wrap mid-line in PDFs.
+                        chunk = re.sub(r"\s+", " ", chunk)
+                        blocks.append(Paragraph(runs=[Run(text=chunk)]))
+            elif isinstance(elem, LTFigure):
+                _walk_for_images(elem)
+            elif isinstance(elem, LTImage):
+                img_block = _ltimage_to_block(elem, images_seen + 1)
+                if img_block is not None:
+                    blocks.append(img_block)
+                    images_seen += 1
+
+    return TextDoc(blocks=blocks, metadata={"page_count": page_num})
+
+
+def _ltimage_to_block(ltimage, index: int) -> Optional[Image]:
+    """Convert a pdfminer LTImage to our Image IR block. Tries to keep the
+    encoded bytes as-is for JPEG (DCTDecode) and re-encodes everything else
+    to PNG via Pillow. Returns None for image types we can't decode."""
+    try:
+        stream = ltimage.stream
+        if stream is None:
+            return None
+        # pdfminer exposes the raw stream filters via stream.attrs.get('Filter')
+        # and the decoded bytes via stream.get_data(). For JPEGs we want the
+        # original DCT bytes (no re-encode); for others we re-encode to PNG.
+        filt = stream.attrs.get("Filter")
+        filt_name = ""
+        if filt is not None:
+            try:
+                # Filter can be a single PSLiteral or a list; pdfminer.psparser
+                # doesn't import cleanly here, so duck-type via repr.
+                if isinstance(filt, list):
+                    filt_name = str(filt[0]) if filt else ""
+                else:
+                    filt_name = str(filt)
+            except Exception:
+                filt_name = ""
+        # rawdata holds the pre-filter bytes; bytes the post-filter pixel data.
+        if "DCTDecode" in filt_name:
+            # JPEG — keep encoded bytes verbatim
+            data = stream.get_rawdata() or stream.get_data()
+            return Image(data=data, mime="image/jpeg",
+                          alt=f"image{index}.jpg")
+        # Decode then re-encode as PNG
+        try:
+            from PIL import Image as PILImage
+        except ImportError:
+            return None
+        raw = stream.get_data()
+        width = stream.attrs.get("Width") or 0
+        height = stream.attrs.get("Height") or 0
+        bits = stream.attrs.get("BitsPerComponent", 8)
+        cs = stream.attrs.get("ColorSpace")
+        # Best-effort color space → Pillow mode
+        mode = "RGB"
+        cs_str = str(cs) if cs is not None else ""
+        if "DeviceGray" in cs_str:
+            mode = "L"
+        elif "DeviceRGB" in cs_str:
+            mode = "RGB"
+        elif "DeviceCMYK" in cs_str:
+            mode = "CMYK"
+        if width <= 0 or height <= 0:
+            return None
+        try:
+            pil = PILImage.frombytes(mode, (int(width), int(height)), raw)
+        except Exception:
+            return None
+        if mode == "CMYK":
+            pil = pil.convert("RGB")
+        out = io.BytesIO()
+        pil.save(out, format="PNG", optimize=False)
+        return Image(data=out.getvalue(), mime="image/png",
+                      alt=f"image{index}.png")
+    except Exception:
+        # Anything goes wrong — skip this image rather than failing the whole
+        # extraction. The text still comes through.
+        return None
+
+
+# ============================================================
+# Fallback extractor — recoded (kept from earlier)
+# ============================================================
+
+def _read_recoded(path: Path, cancel: CancellationToken) -> TextDoc:
     raw = path.read_bytes()
     cancel.check()
     try:
         doc = _extract_pdf(raw, cancel)
     except _PdfError as e:
-        _log.warning("pdf parse failed: %s", e)
+        _log.warning("recoded pdf parse failed: %s", e)
         return TextDoc(
             blocks=[Paragraph(runs=[Run(text=f"(Could not extract text: {e})")])],
             metadata={"warnings": [f"PDF extraction failed: {e}"]},
         )
-    # Low-extraction heuristic: large PDF that yielded almost no text usually
-    # means scanned/image-only or a compression we don't support.
-    total_chars = sum(len(r.text) for blk in doc.blocks
-                      if isinstance(blk, Paragraph) for r in blk.runs)
-    if len(raw) > 100_000 and total_chars < 50:
-        doc.metadata.setdefault("warnings", []).append(
-            "Limited text extracted — this PDF may be scanned, encrypted, "
-            "or use unsupported compression. Try opening it in a PDF viewer first."
-        )
+    _annotate_low_extraction_warning(doc, path)
     return doc
 
 

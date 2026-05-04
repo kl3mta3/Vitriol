@@ -1,0 +1,340 @@
+"""Streaming PNG and BMP encoders/decoders sized for the new tiered
+image-masquerade format. The point is bounded memory: a 4 GiB envelope
+encodes into an 8192×8192 PNG using <2× CHUNK_SIZE of working memory.
+
+PNG layout we emit (matches PNG 1.2 spec):
+    8-byte signature  \\x89PNG\\r\\n\\x1a\\n
+    IHDR              width, height, bit_depth=8, color_type=2 (RGB),
+                      compression=0, filter=0, interlace=0
+    IDAT*             zlib-compressed scanlines, split into chunks of
+                      ~CHUNK_SIZE so writers can flush incrementally
+    IEND              terminator
+
+Each scanline is `[filter byte 0] + [width × 3 RGB bytes]`. Filter 0 (None)
+means raw bytes — no per-line predictor. We always emit filter 0 because
+our pixel data is essentially random (envelope + payload + pseudo-random
+pad), so filtering wouldn't help compression.
+
+BMP layout (Windows V1, 24-bit RGB, top-down via negative height):
+    14-byte BMP file header
+    40-byte BITMAPINFOHEADER
+    pixel rows (BGR order on disk, padded to 4-byte stride)
+
+We feed the encoders an iterator yielding chunks of RGB bytes (in row-major
+order) totalling exactly `width × height × 3`. Decoders return an iterator
+yielding RGB chunks the same way.
+"""
+from __future__ import annotations
+import struct
+import zlib
+from pathlib import Path
+from typing import Iterator, Iterable, Optional
+
+from ..utils.cancellation import CancellationToken
+from ..core.config import CHUNK_SIZE
+
+
+# ---------------------------------------------------------------------------
+# PNG
+# ---------------------------------------------------------------------------
+
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    return (struct.pack(">I", len(data)) + tag + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+
+def _png_chunk_to_file(out, tag: bytes, data: bytes) -> None:
+    out.write(struct.pack(">I", len(data)))
+    out.write(tag)
+    out.write(data)
+    out.write(struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+
+def stream_png_write(dst: Path, width: int, height: int,
+                      data_iter: Iterable[bytes],
+                      cancel: Optional[CancellationToken] = None,
+                      progress=None) -> None:
+    """Write a PNG to `dst`. `data_iter` must yield exactly width*height*3
+    bytes total (RGB row-major). Memory usage is bounded by CHUNK_SIZE +
+    one scanline + zlib's internal window."""
+    expected = width * height * 3
+    bytes_per_row = width * 3
+    compressor = zlib.compressobj(level=zlib.Z_DEFAULT_COMPRESSION)
+    pending = bytearray()
+    written = 0
+
+    with open(dst, "wb") as out:
+        out.write(PNG_SIG)
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        _png_chunk_to_file(out, b"IHDR", ihdr)
+
+        # Keep a small re-assembly buffer so we can split incoming bytes into
+        # exact scanlines (each prefixed with filter byte 0).
+        scratch = bytearray()
+        for chunk in data_iter:
+            if cancel is not None:
+                cancel.check()
+            if not chunk:
+                continue
+            scratch.extend(chunk)
+            written += len(chunk)
+            # Emit complete scanlines from scratch
+            while len(scratch) >= bytes_per_row:
+                row = bytes(scratch[:bytes_per_row])
+                del scratch[:bytes_per_row]
+                pending.extend(compressor.compress(b"\x00" + row))
+                # Flush a chunk if pending grew enough
+                if len(pending) >= CHUNK_SIZE:
+                    _png_chunk_to_file(out, b"IDAT", bytes(pending[:CHUNK_SIZE]))
+                    del pending[:CHUNK_SIZE]
+            if progress is not None and expected:
+                progress(min(0.99, written / expected))
+
+        # Source must have ended on a row boundary
+        if scratch:
+            raise ValueError(
+                f"stream_png_write: data_iter delivered {written} bytes; "
+                f"final {len(scratch)} bytes don't form a complete scanline "
+                f"(width*3 = {bytes_per_row})."
+            )
+        # Flush compressor
+        pending.extend(compressor.flush(zlib.Z_FINISH))
+        # Emit remaining IDATs in CHUNK_SIZE pieces
+        while len(pending) >= CHUNK_SIZE:
+            _png_chunk_to_file(out, b"IDAT", bytes(pending[:CHUNK_SIZE]))
+            del pending[:CHUNK_SIZE]
+        if pending:
+            _png_chunk_to_file(out, b"IDAT", bytes(pending))
+        _png_chunk_to_file(out, b"IEND", b"")
+    if progress is not None:
+        progress(1.0)
+    if written != expected:
+        raise ValueError(
+            f"stream_png_write: data_iter delivered {written} bytes; "
+            f"expected {expected} for {width}×{height} RGB."
+        )
+
+
+def stream_png_read(src: Path,
+                     cancel: Optional[CancellationToken] = None,
+                     progress=None) -> tuple[int, int, Iterator[bytes]]:
+    """Open a PNG and return (width, height, rgb_iterator). The iterator
+    yields raw RGB bytes (no filter bytes, no padding). Caller is
+    responsible for consuming `width*height*3` bytes total."""
+    f = open(src, "rb")
+    sig = f.read(8)
+    if sig != PNG_SIG:
+        f.close()
+        raise ValueError("Not a PNG file (bad signature).")
+
+    # First chunk must be IHDR
+    length, tag = struct.unpack(">I", f.read(4))[0], f.read(4)
+    if tag != b"IHDR":
+        f.close()
+        raise ValueError("PNG missing IHDR chunk.")
+    ihdr = f.read(length)
+    f.read(4)  # CRC, ignored
+    width, height, bit_depth, color_type, _comp, _filt, _intr = struct.unpack(">IIBBBBB", ihdr)
+    if bit_depth != 8 or color_type != 2:
+        f.close()
+        raise ValueError(f"Unsupported PNG: bit_depth={bit_depth} color_type={color_type} "
+                         f"(expected 8-bit RGB / type 2).")
+
+    bytes_per_row = width * 3
+    expected = bytes_per_row * height
+
+    def _iter():
+        try:
+            decomp = zlib.decompressobj()
+            scratch = bytearray()
+            yielded = 0
+            while True:
+                if cancel is not None:
+                    cancel.check()
+                hdr = f.read(8)
+                if len(hdr) < 8:
+                    break
+                clen, ctag = struct.unpack(">I", hdr[:4])[0], hdr[4:8]
+                cdata = f.read(clen)
+                f.read(4)  # CRC
+                if ctag == b"IEND":
+                    break
+                if ctag != b"IDAT":
+                    continue  # skip ancillary chunks
+                scratch.extend(decomp.decompress(cdata))
+                # Strip filter bytes — emit complete rows as RGB
+                while len(scratch) >= 1 + bytes_per_row:
+                    # filter byte at scratch[0] — must be 0 in our outputs
+                    if scratch[0] != 0:
+                        raise ValueError(
+                            f"stream_png_read: unsupported filter type {scratch[0]} "
+                            "(only filter 0 / None is supported by this reader)."
+                        )
+                    row = bytes(scratch[1:1 + bytes_per_row])
+                    del scratch[:1 + bytes_per_row]
+                    yielded += len(row)
+                    if progress is not None and expected:
+                        progress(min(0.99, yielded / expected))
+                    yield row
+            # Flush any tail
+            tail = decomp.flush()
+            if tail:
+                scratch.extend(tail)
+                while len(scratch) >= 1 + bytes_per_row:
+                    if scratch[0] != 0:
+                        raise ValueError("stream_png_read: unsupported filter in tail.")
+                    row = bytes(scratch[1:1 + bytes_per_row])
+                    del scratch[:1 + bytes_per_row]
+                    yielded += len(row)
+                    yield row
+            if yielded != expected:
+                raise ValueError(
+                    f"stream_png_read: produced {yielded} bytes; "
+                    f"expected {expected} for {width}×{height} RGB."
+                )
+        finally:
+            f.close()
+            if progress is not None:
+                progress(1.0)
+
+    return width, height, _iter()
+
+
+# ---------------------------------------------------------------------------
+# BMP
+# ---------------------------------------------------------------------------
+
+def _bmp_row_stride(width: int) -> int:
+    return (width * 3 + 3) & ~3   # 4-byte alignment
+
+
+def stream_bmp_write(dst: Path, width: int, height: int,
+                      data_iter: Iterable[bytes],
+                      cancel: Optional[CancellationToken] = None,
+                      progress=None) -> None:
+    """Write a 24-bit BMP with negative height (top-down rows) to dst.
+    `data_iter` must yield exactly width*height*3 bytes RGB row-major."""
+    expected = width * height * 3
+    bytes_per_row = width * 3
+    stride = _bmp_row_stride(width)
+    pad_per_row = stride - bytes_per_row
+    pixel_offset = 14 + 40
+    file_size = pixel_offset + stride * height
+
+    with open(dst, "wb") as out:
+        # 14-byte BMP file header
+        out.write(b"BM")
+        out.write(struct.pack("<I", file_size))
+        out.write(b"\x00\x00\x00\x00")
+        out.write(struct.pack("<I", pixel_offset))
+        # 40-byte BITMAPINFOHEADER (negative height = top-down)
+        out.write(struct.pack("<IiiHHIIiiII",
+                               40, width, -height, 1, 24, 0, stride * height,
+                               2835, 2835, 0, 0))
+
+        scratch = bytearray()
+        written = 0
+        pad = b"\x00" * pad_per_row
+        for chunk in data_iter:
+            if cancel is not None:
+                cancel.check()
+            if not chunk:
+                continue
+            scratch.extend(chunk)
+            written += len(chunk)
+            while len(scratch) >= bytes_per_row:
+                row = bytes(scratch[:bytes_per_row])
+                del scratch[:bytes_per_row]
+                # BMP stores pixels in BGR order on disk
+                bgr = bytearray(bytes_per_row)
+                bgr[0::3] = row[2::3]
+                bgr[1::3] = row[1::3]
+                bgr[2::3] = row[0::3]
+                out.write(bytes(bgr))
+                if pad_per_row:
+                    out.write(pad)
+            if progress is not None and expected:
+                progress(min(0.99, written / expected))
+
+        if scratch:
+            raise ValueError(
+                f"stream_bmp_write: data_iter delivered {written} bytes; "
+                f"final {len(scratch)} bytes don't form a complete scanline."
+            )
+    if progress is not None:
+        progress(1.0)
+    if written != expected:
+        raise ValueError(
+            f"stream_bmp_write: data_iter delivered {written} bytes; "
+            f"expected {expected} for {width}×{height} RGB."
+        )
+
+
+def stream_bmp_read(src: Path,
+                     cancel: Optional[CancellationToken] = None,
+                     progress=None) -> tuple[int, int, Iterator[bytes]]:
+    """Open a 24-bit BMP and return (width, height, rgb_iterator).
+
+    Supports both top-down (negative height) and bottom-up storage. For
+    bottom-up images the iterator still yields rows top-to-bottom (we read
+    the file end-to-start row by row)."""
+    f = open(src, "rb")
+    head = f.read(54)
+    if head[:2] != b"BM":
+        f.close()
+        raise ValueError("Not a BMP file (missing BM magic).")
+    pixel_offset = struct.unpack("<I", head[10:14])[0]
+    width, raw_height = struct.unpack("<ii", head[18:26])
+    bit_count = struct.unpack("<H", head[28:30])[0]
+    if bit_count != 24:
+        f.close()
+        raise ValueError(f"Unsupported BMP bit depth {bit_count} (need 24).")
+    top_down = raw_height < 0
+    height = abs(raw_height)
+    bytes_per_row = width * 3
+    stride = _bmp_row_stride(width)
+    expected = bytes_per_row * height
+
+    def _iter():
+        try:
+            f.seek(pixel_offset)
+            yielded = 0
+            if top_down:
+                for _ in range(height):
+                    if cancel is not None:
+                        cancel.check()
+                    raw = f.read(stride)
+                    bgr = raw[:bytes_per_row]
+                    rgb = bytearray(bytes_per_row)
+                    rgb[0::3] = bgr[2::3]
+                    rgb[1::3] = bgr[1::3]
+                    rgb[2::3] = bgr[0::3]
+                    yielded += bytes_per_row
+                    if progress is not None and expected:
+                        progress(min(0.99, yielded / expected))
+                    yield bytes(rgb)
+            else:
+                # Bottom-up: read each row from end to start
+                for r in range(height):
+                    if cancel is not None:
+                        cancel.check()
+                    f.seek(pixel_offset + (height - 1 - r) * stride)
+                    raw = f.read(stride)
+                    bgr = raw[:bytes_per_row]
+                    rgb = bytearray(bytes_per_row)
+                    rgb[0::3] = bgr[2::3]
+                    rgb[1::3] = bgr[1::3]
+                    rgb[2::3] = bgr[0::3]
+                    yielded += bytes_per_row
+                    if progress is not None and expected:
+                        progress(min(0.99, yielded / expected))
+                    yield bytes(rgb)
+        finally:
+            f.close()
+            if progress is not None:
+                progress(1.0)
+
+    return width, height, _iter()

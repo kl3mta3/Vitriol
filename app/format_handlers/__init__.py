@@ -123,6 +123,18 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
         if cat == "video":
             targets |= {e for e, c in MEDIA_CATEGORY_OF.items() if c == "audio"}
         targets &= MEDIA_WRITE_OK
+        # NEW: image sources can also convert to document targets — the
+        # image_bytes_to_textdoc adapter wraps them in a single-block TextDoc
+        # which document writers (pdf_write, markdown, txt, html, docx, epub)
+        # render as embedded images or bundle layouts.
+        if cat == "image":
+            for ext, mod in WRITERS.items():
+                if ext == src_ext:
+                    continue
+                # Any text/tabular DOC_KIND writer can accept the image-to-textdoc
+                # adapter's output.
+                if getattr(mod, "DOC_KIND", "text") in ("text", "tabular"):
+                    targets.add(ext)
         return sorted(targets | extras)
 
     # Document/tabular: any ext that has a writer of compatible kind.

@@ -25,9 +25,44 @@ from . import charset
 # This module exposes multiple DOC_KINDs. The registry currently keys handlers
 # by ext on a single DOC_KIND, so we split into per-ext "shim" attributes by
 # listing both reads/writes here and dispatching internally.
-SUPPORTED_READ = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html"}
-SUPPORTED_WRITE = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html"}
+SUPPORTED_READ = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html", ".py"}
+SUPPORTED_WRITE = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html", ".py"}
 DOC_KIND = "text"
+
+# Streaming pass-through: plain-text → plain-text conversion above the
+# streaming threshold can be a chunked file copy with optional encoding
+# normalization. Rich-text round-trips via TextDoc (HTML, etc.) stay on the
+# whole-file path because the IR tree must be in memory.
+STREAMABLE = True
+_STREAM_PASSTHROUGH_EXTS = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".py"}
+
+
+def can_stream(src_ext: str, dst_ext: str) -> bool:
+    """Streaming pass-through is only safe when both ends are bytes-compatible
+    plain text (no HTML→TextDoc rebuild, no CSV/TSV tabular structure)."""
+    s = src_ext.lower(); d = dst_ext.lower()
+    return s in _STREAM_PASSTHROUGH_EXTS and d in _STREAM_PASSTHROUGH_EXTS
+
+
+def stream_convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
+                    cancel, progress) -> None:
+    """Chunked file copy. Used by router when src is large AND both ends
+    are plain-text-compatible. Bytes are preserved exactly."""
+    import shutil
+    from ..core.config import CHUNK_SIZE
+    total = src.stat().st_size
+    written = 0
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        while True:
+            cancel.check()
+            buf = fi.read(CHUNK_SIZE)
+            if not buf:
+                break
+            fo.write(buf)
+            written += len(buf)
+            if total:
+                progress(min(0.99, written / total))
+    progress(1.0)
 
 
 def read(path: Path, ext: str, cancel: CancellationToken):
@@ -49,15 +84,57 @@ def write(doc, path: Path, ext: str, cancel: CancellationToken) -> None:
     if not isinstance(doc, TextDoc):
         path.write_bytes(str(doc).encode("utf-8"))
         return
-    if ext == ".html":
-        path.write_text(_textdoc_to_html(doc), encoding="utf-8")
-        return
     if ext == ".json":
         path.write_text(_textdoc_to_json(doc), encoding="utf-8")
         return
-    # Plain-text default for txt/md/log/ini/xml/yaml: flatten.
-    from ..core.intermediate import textdoc_to_plain
-    path.write_text(textdoc_to_plain(doc), encoding="utf-8")
+    if ext == ".html":
+        from ..core.bundle_writer import write_with_bundle
+        write_with_bundle(
+            doc, path,
+            flat_render=lambda d, p: p.write_text(_textdoc_to_html(d), encoding="utf-8"),
+        )
+        return
+    # Plain-text default for txt/log/ini/xml/yaml/py: flatten with bundle when images present.
+    from ..core.bundle_writer import write_with_bundle
+    write_with_bundle(
+        doc, path,
+        flat_render=lambda d, p: p.write_text(_textdoc_to_plain_with_hrefs(d), encoding="utf-8"),
+    )
+
+
+def _textdoc_to_plain_with_hrefs(doc: TextDoc) -> str:
+    """Like intermediate.textdoc_to_plain but renders Image blocks using
+    `href` when set (bundle mode) so the text references the saved file."""
+    parts: List[str] = []
+    for blk in doc.blocks:
+        parts.append(_block_to_plain_with_hrefs(blk, depth=0))
+    return "\n\n".join(p for p in parts if p)
+
+
+def _block_to_plain_with_hrefs(blk, depth: int) -> str:
+    if isinstance(blk, Image):
+        ref = blk.href or blk.alt or ""
+        return f"[image: {ref}]" if ref else "[image]"
+    if isinstance(blk, List_):
+        lines = []
+        for i, item in enumerate(blk.items, 1):
+            prefix = f"{i}. " if blk.ordered else "- "
+            inner = "\n".join(_block_to_plain_with_hrefs(b, depth + 1) for b in item)
+            lines.append("  " * depth + prefix + inner)
+        return "\n".join(lines)
+    if isinstance(blk, Table):
+        from ..core.intermediate import _block_to_plain  # reuse for cells
+        lines = []
+        for row in blk.rows:
+            cells = [" ".join(_block_to_plain_with_hrefs(b, 0) for b in cell).strip() for cell in row]
+            lines.append(" | ".join(cells))
+        return "\n".join(lines)
+    if isinstance(blk, Blockquote):
+        inner = "\n".join(_block_to_plain_with_hrefs(b, depth) for b in blk.blocks)
+        return "\n".join("> " + ln for ln in inner.splitlines())
+    # Fall through to the standard renderer for non-image blocks.
+    from ..core.intermediate import _block_to_plain
+    return _block_to_plain(blk, depth)
 
 
 # ---- Plain text ----------------------------------------------------------
@@ -311,10 +388,16 @@ def _block_to_html(blk, depth: int = 0) -> str:
             rows_html.append(f"<tr>{cells}</tr>")
         return f"<table>{''.join(rows_html)}</table>"
     if isinstance(blk, Image):
-        # Embed as data URI for self-contained HTML
-        import base64
-        b64 = base64.b64encode(blk.data).decode("ascii")
-        return f'<img src="data:{blk.mime};base64,{b64}" alt="{html_escape(blk.alt)}"/>'
+        alt = html_escape(blk.alt or "")
+        # Bundle mode: href set by bundle_writer to a relative path like
+        # "images/image1.png". Otherwise embed as data URI for self-contained HTML.
+        if blk.href:
+            return f'<img src="{html_escape(blk.href, quote=True)}" alt="{alt}"/>'
+        if blk.data:
+            import base64
+            b64 = base64.b64encode(blk.data).decode("ascii")
+            return f'<img src="data:{blk.mime};base64,{b64}" alt="{alt}"/>'
+        return f'<img alt="{alt}"/>'
     if isinstance(blk, CodeBlock):
         cls = f' class="language-{html_escape(blk.lang)}"' if blk.lang else ""
         return f"<pre><code{cls}>{html_escape(blk.text)}</code></pre>"
