@@ -1,14 +1,15 @@
-"""Universal Converter — entry point."""
+"""Transmute — entry point."""
 from __future__ import annotations
 import sys
 import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.utils.logger import get_logger
-from app.utils.paths import app_root, log_file
+from app.utils.paths import app_root, log_file, resources_dir
 from app import format_handlers
 
 
@@ -16,6 +17,15 @@ def _load_stylesheet(app: QApplication) -> None:
     qss = app_root() / "theme.qss"
     if qss.exists():
         app.setStyleSheet(qss.read_text(encoding="utf-8"))
+
+
+def _load_app_icon(app: QApplication) -> None:
+    """Set the app/window icon from resources/logo.svg. QIcon supports SVG
+    natively via the QtSvg plugin; Qt will rasterize at the size each
+    surface (taskbar, alt-tab, window title) requests."""
+    svg = resources_dir() / "logo.svg"
+    if svg.exists():
+        app.setWindowIcon(QIcon(str(svg)))
 
 
 def _install_exception_logging(log) -> None:
@@ -35,7 +45,7 @@ def _install_exception_logging(log) -> None:
             if app is not None:
                 short = f"{exc_type.__name__}: {exc_value}"
                 msg = (
-                    f"Universal Converter hit an unexpected error:\n\n{short}\n\n"
+                    f"Transmute hit an unexpected error:\n\n{short}\n\n"
                     f"Full details written to:\n{log_file()}"
                 )
                 QTimer.singleShot(0, lambda: QMessageBox.critical(None, "Error", msg))
@@ -46,12 +56,13 @@ def _install_exception_logging(log) -> None:
 
 def main() -> int:
     log = get_logger()
-    log.info("starting Universal Converter")
+    log.info("starting Transmute")
     _install_exception_logging(log)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Universal Converter")
-    app.setOrganizationName("UniversalConverter")
+    app.setApplicationName("Transmute")
+    app.setOrganizationName("Transmute")
+    _load_app_icon(app)
     _load_stylesheet(app)
 
     # Build the format-handler registry now that PySide6 is up.

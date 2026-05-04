@@ -1,6 +1,5 @@
 """One row in the playlist. 10 elements per the spec."""
 from __future__ import annotations
-from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -14,13 +13,8 @@ from PySide6.QtWidgets import (
 from .. import format_handlers as fh
 from ..core.file_detector import detect, normalize_ext
 from ..utils.paths import output_dir
-
-
-class Status(str, Enum):
-    QUEUED = "queued"
-    RUNNING = "running"
-    DONE = "done"
-    ERROR = "error"
+from ._status import Status
+from .status_glyph import StatusGlyph
 
 
 class ProgressLabel(QLabel):
@@ -94,9 +88,8 @@ class PlaylistItemWidget(QWidget):
         self.checkbox.setChecked(False)
         layout.addWidget(self.checkbox)
 
-        # 2. Status circle
-        self.status_circle = QLabel()
-        self._apply_status_style()
+        # 2. Status glyph (custom-painted: ring / rotor / disc-with-mark)
+        self.status_circle = StatusGlyph()
         layout.addWidget(self.status_circle)
 
         # 3. Title with progress overlay
@@ -185,7 +178,7 @@ class PlaylistItemWidget(QWidget):
     def set_status(self, status: Status, error_msg: str | None = None) -> None:
         self._status = status
         self._is_running = status == Status.RUNNING
-        self._apply_status_style()
+        self.status_circle.set_status(status)
         if status == Status.ERROR and error_msg:
             self.status_circle.setToolTip(error_msg)
         else:
@@ -209,18 +202,6 @@ class PlaylistItemWidget(QWidget):
         self.set_status(Status.QUEUED)
 
     # --- internals ----------------------------------------------------------
-    def _apply_status_style(self) -> None:
-        names = {
-            Status.QUEUED: "StatusCircleQueued",
-            Status.RUNNING: "StatusCircleRunning",
-            Status.DONE: "StatusCircleDone",
-            Status.ERROR: "StatusCircleError",
-        }
-        self.status_circle.setObjectName(names[self._status])
-        # Re-polish so QSS picks up the new objectName
-        self.status_circle.style().unpolish(self.status_circle)
-        self.status_circle.style().polish(self.status_circle)
-
     def _refresh_button(self) -> None:
         if self._is_running:
             self.convert_btn.setText("Stop")

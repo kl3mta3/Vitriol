@@ -103,12 +103,15 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
     if not src_ext.startswith("."):
         src_ext = "." + src_ext
 
-    # Masquerade extras: any source can be embedded into any masquerade host.
+    # Philosopher's Stone extras: any *lossless* source can be embedded into
+    # any Stone host. Lossy sources (jpg, mp3, mp4, etc.) are excluded so the
+    # round-trip stays meaningful — see masquerade.LOSSY_EXTS for the list.
     extras: set[str] = set()
     if masquerade:
         try:
             from . import masquerade as _msq
-            extras = {e for e in _msq.TARGETS if e != src_ext}
+            if not _msq.is_lossy(src_ext):
+                extras = {e for e in _msq.TARGETS if e != src_ext}
         except ImportError:
             extras = set()
 

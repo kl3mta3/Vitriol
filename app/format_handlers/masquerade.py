@@ -42,8 +42,62 @@ from ..utils.paths import bin_dir
 MAGIC = b"UCMSv1\0"
 
 # Read-write capable host extensions. Used by the registry + dropdown filter
-# when Masquerade Mode is on.
+# when Philosopher's Stone (a.k.a. Masquerade) mode is on.
 TARGETS = {".wav", ".png", ".bmp", ".txt", ".mkv"}
+
+# Lossy source extensions excluded from Stone mode entirely. The bytes of a
+# JPG/MP3/MP4 file *can* technically be embedded into a Stone host and
+# recovered byte-exact, but the original media data inside them is already
+# a lossy compression — treating them as "preserved" is conceptually wrong.
+# More importantly, since Stone targets only contain lossless containers,
+# the dropdown asymmetry (jpg→txt allowed but txt→jpg not) confuses users.
+# Exclude lossy formats from being Stone sources to keep the model symmetric:
+# only lossless data goes through the Stone.
+LOSSY_EXTS = {
+    # Images
+    ".jpg", ".jpeg", ".webp", ".heic",
+    # Audio
+    ".mp3", ".ogg", ".opus", ".m4a", ".aac", ".wma", ".ac3", ".amr",
+    # Video
+    ".mp4", ".webm", ".mov", ".wmv", ".flv", ".mpg", ".3gp", ".ts",
+    ".vob", ".ogv", ".avi",
+}
+
+
+def is_lossy(ext: str) -> bool:
+    e = ext.lower()
+    if not e.startswith("."):
+        e = "." + e
+    return e in LOSSY_EXTS
+
+
+def has_envelope(path: "Path", ext: str) -> bool:
+    """Quick check: does this file contain a UCMSv1 envelope? Returns False
+    for vanilla files of the same extension (e.g. an ordinary PNG with no
+    Stone payload), so the router can fall through to normal conversion
+    instead of routing through the masquerade engine.
+
+    Strategy: scan a bounded prefix of the file for the magic bytes. WAV/
+    PNG/BMP/TXT envelopes all live in the first few KB of the file. For
+    MKV we wrote the title tag "UCMSv1" into the MKV header near the start
+    of the file, so the ASCII bytes 'UCMSv1' appear in the first ~32 KB
+    even though the binary MAGIC sits inside compressed frame data.
+    """
+    ext = ext.lower()
+    if ext not in TARGETS:
+        return False
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64 * 1024)
+    except OSError:
+        return False
+    if MAGIC in head:
+        return True
+    # MKV: rely on the title tag we set at embed time. Tag value is stored
+    # as UTF-8 in the EBML Tags section, near the file start.
+    if ext == ".mkv" and b"UCMSv1" in head:
+        return True
+    return False
 
 # MKV host parameters. 42 fps is intentional — non-standard rate that
 # fingerprints Masquerade output: combined with the UCMSv1 magic in the

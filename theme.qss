@@ -1,4 +1,4 @@
-/* Universal Converter — dark theme */
+/* Transmute — dark theme */
 
 QMainWindow, QWidget {
     background-color: #0a0a0f;
@@ -114,10 +114,24 @@ QLineEdit {
     padding: 3px 8px;
 }
 
-QLabel#StatusCircleQueued  { background-color: #3b82f6; border-radius: 7px; min-width:14px; max-width:14px; min-height:14px; max-height:14px; }
-QLabel#StatusCircleRunning { background-color: #f1c40f; border-radius: 7px; min-width:14px; max-width:14px; min-height:14px; max-height:14px; }
-QLabel#StatusCircleDone    { background-color: #2ecc71; border-radius: 7px; min-width:14px; max-width:14px; min-height:14px; max-height:14px; }
-QLabel#StatusCircleError   { background-color: #e74c3c; border-radius: 7px; min-width:14px; max-width:14px; min-height:14px; max-height:14px; }
+/* StatusGlyph paints itself — no QSS needed for the per-row status indicator. */
+
+/* Philosopher's Stone toggle "active" state: gold-tinted text + indicator
+   tinted red (the alchemy-active accent #5e051b). When the toggle is off the
+   defaults from QCheckBox above apply. The dynamic property is set by
+   MainWindow._refresh_stone_visuals(). */
+QCheckBox#StoneToggle[stoneActive="true"] {
+    color: #d4a574;
+    font-weight: 600;
+}
+QCheckBox#StoneToggle[stoneActive="true"]::indicator {
+    background-color: #5e051b;
+    border-color: #d4a574;
+}
+QCheckBox#StoneToggle[stoneActive="true"]::indicator:checked {
+    background-color: #d4a574;
+    border-color: #d4a574;
+}
 
 QListWidget {
     background-color: #0d0d15;

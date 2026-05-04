@@ -1,4 +1,4 @@
-# Universal Converter
+# Transmute
 
 A Windows-first desktop file converter for text, audio, video, image, and 3D model formats. Built around a self-contained, offline-first philosophy: only PySide6, Pillow, and striprtf as Python dependencies, plus FFmpeg (subprocess) and Assimp (ctypes) as native binaries. Every other format handler is recoded from stdlib.
 
@@ -34,7 +34,9 @@ After everything is in place the launcher hands off to `main.py` via subprocess 
 
 ## Top-bar toggles
 
-**Masquerade Mode** (off by default; persists across sessions). When on, the per-row target dropdown expands to include byte-passthrough hosts: `.wav`, `.png`, `.bmp`, `.txt`, `.mkv`. Embedding hides any source file losslessly inside the host's data section behind a self-defining envelope (`UCMSv1` magic + original-extension + payload bytes). The reverse direction recovers the original file byte-exact.
+**Philosopher's Stone** (off by default; persists across sessions). When on, the per-row target dropdown expands to include byte-passthrough hosts: `.wav`, `.png`, `.bmp`, `.txt`, `.mkv`. Embedding hides any source file losslessly inside the host's data section behind a self-defining envelope (`UCMSv1` magic + original-extension + payload bytes). The reverse direction recovers the original file byte-exact.
+
+Lossy source formats (`.jpg`, `.webp`, `.heic`, `.mp3`, `.ogg`, `.opus`, `.m4a`, `.aac`, `.wma`, `.ac3`, `.amr`, `.mp4`, `.webm`, `.mov`, `.wmv`, `.flv`, `.mpg`, `.3gp`, `.ts`, `.vob`, `.ogv`, `.avi`) are excluded from Stone routing. Their bytes can technically round-trip through a host container, but the original media data inside them is already a lossy compression — treating them as "preserved" is conceptually wrong, and the dropdown asymmetry (jpg→txt allowed, txt→jpg not) confused users. Only lossless data goes through the Stone.
 
 | Host | Container | Notes |
 |---|---|---|
@@ -42,11 +44,11 @@ After everything is in place the launcher hands off to `main.py` via subprocess 
 | `.png` | 1×1 RGBA + private `ucMs` ancillary chunk | Displays as 1px transparent |
 | `.bmp` | 1×1 24-bit + payload appended after pixel array | Displays as 1px |
 | `.txt` | Base64-wrapped envelope with `#` header | Always opens cleanly in any text editor |
-| `.mkv` | Matroska + rawvideo rgb24, 1024×1024 @ **42 fps** | Plays as static video. Requires FFmpeg. **42 fps is intentional** — it fingerprints Masquerade output: combined with the `UCMSv1` magic in frame-zero pixels, anyone can identify "this is a Masquerade file" by reading the container header alone. Minimum 42 frames so the clip is always at least 1.0 second |
+| `.mkv` | Matroska + rawvideo rgb24, 1024×1024 @ **42 fps** | Plays as static video. Requires FFmpeg. **42 fps is intentional** — it fingerprints Stone output: combined with the `UCMSv1` magic in frame-zero pixels, anyone can identify "this is a Transmute Stone file" by reading the container header alone. Minimum 42 frames so the clip is always at least 1.0 second |
 
 For MKV, frame data carries the envelope (hybrid approach) AND the MKV metadata tags duplicate the byte count, real frame count, and padding frame count for inspection in mkvinfo. Round-trip reads the envelope from frame pixels — surviving any tool that preserves the rawvideo stream. The metadata tags are advisory only.
 
-**Verify Round-Trip** (greyed unless Masquerade is on). After each conversion, immediately runs the reverse direction into a temp folder, hashes both files, and only commits the output if `sha256(reverse(forward(src))) == sha256(src)`. The temp folder is cleaned up on success, on verification failure, and on app exit. Distinguishes "verification could not complete" (I/O error during compare — retry safe) from "verification failed — bytes differ" (genuine round-trip failure — the host doesn't preserve this content).
+**Verify Round-Trip** (greyed unless Philosopher's Stone is on). After each conversion, immediately runs the reverse direction into a temp folder, hashes both files, and only commits the output if `sha256(reverse(forward(src))) == sha256(src)`. The temp folder is cleaned up on success, on verification failure, and on app exit. Distinguishes "verification could not complete" (I/O error during compare — retry safe) from "verification failed — bytes differ" (genuine round-trip failure — the host doesn't preserve this content).
 
 ## Bundle output for Markdown
 

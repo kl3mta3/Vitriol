@@ -21,7 +21,7 @@ def app_root() -> Path:
 
 def _local_app_data() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return Path(base) / "UniversalConverter"
+    return Path(base) / "Transmute"
 
 
 def _is_writable(p: Path) -> bool:
@@ -89,7 +89,7 @@ def log_file() -> Path:
     if not _is_writable(base):
         base = _local_app_data() / "logs"
     base.mkdir(parents=True, exist_ok=True)
-    return base / "universal-converter.log"
+    return base / "transmute.log"
 
 
 def unique_path(target: Path) -> Path:

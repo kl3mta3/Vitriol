@@ -1,7 +1,7 @@
 """Persisted user settings.
 
-JSON file at %LOCALAPPDATA%/UniversalConverter/settings.json (Windows) or
-~/.local/share/UniversalConverter/settings.json (other). Loaded once, written
+JSON file at %LOCALAPPDATA%/Transmute/settings.json (Windows) or
+~/.local/share/Transmute/settings.json (other). Loaded once, written
 on every change.
 
 Keep the schema small — settings here are global app state that survives
@@ -23,7 +23,7 @@ def _settings_path() -> Path:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
         base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    p = Path(base) / "UniversalConverter"
+    p = Path(base) / "Transmute"
     p.mkdir(parents=True, exist_ok=True)
     return p / "settings.json"
 

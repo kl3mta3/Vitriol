@@ -1,4 +1,4 @@
-"""Universal Converter — launcher.
+"""Transmute — launcher.
 
 Designed to be packaged as a small PyInstaller --onedir bundle (~30 MB) with
 its own embedded Python, separate from the main app. End users only ever run
@@ -79,12 +79,12 @@ def _is_writable(p: Path) -> bool:
 # Read-only install fallback for ./bin/ and ./resources/.
 if not _is_writable(BIN):
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    BIN = Path(base) / "UniversalConverter" / "bin"
+    BIN = Path(base) / "Transmute" / "bin"
     BIN.mkdir(parents=True, exist_ok=True)
     HW_CACHE = BIN / "hw_encoders.json"
 if not _is_writable(RESOURCES):
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    RESOURCES = Path(base) / "UniversalConverter" / "resources"
+    RESOURCES = Path(base) / "Transmute" / "resources"
     RESOURCES.mkdir(parents=True, exist_ok=True)
 
 
@@ -145,6 +145,11 @@ ASSIMP_SHA = ""
 DEJAVU_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
 DEJAVU_SHA = ""
 
+# Cinzel — OFL-licensed engraved-cap serif from Google Fonts. Used for the
+# "Transmute" title only. The static Regular face lives under static/.
+CINZEL_URL = "https://github.com/google/fonts/raw/main/ofl/cinzel/static/Cinzel-Regular.ttf"
+CINZEL_SHA = ""
+
 
 def _find_ffmpeg() -> Optional[Path]:
     local = BIN / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
@@ -171,12 +176,17 @@ def _find_dejavu() -> Optional[Path]:
     return p if p.exists() else None
 
 
+def _find_cinzel() -> Optional[Path]:
+    p = RESOURCES / "fonts" / "Cinzel-Regular.ttf"
+    return p if p.exists() else None
+
+
 def _download(url: str, dst: Path, expected_sha: str, log) -> bool:
     log(f"  downloading {url}")
     tmp = dst.with_suffix(dst.suffix + ".part")
     hasher = hashlib.sha256()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "UniversalConverter/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Transmute/0.1"})
         with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             seen = 0
@@ -259,6 +269,23 @@ def _install_assimp(log) -> bool:
             zip_path.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _install_cinzel(log) -> bool:
+    """Fetch Cinzel-Regular.ttf into resources/fonts/. Direct .ttf download —
+    no zip wrapper. OFL license; safe to redistribute."""
+    log("Cinzel-Regular.ttf missing — fetching (UI title font)")
+    target_dir = RESOURCES / "fonts"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log(f"  could not create {target_dir}: {e}")
+        return False
+    target = target_dir / "Cinzel-Regular.ttf"
+    if _download(CINZEL_URL, target, CINZEL_SHA, log):
+        log("  Cinzel-Regular.ttf installed")
+        return True
+    return False
 
 
 def _install_dejavu(log) -> bool:
@@ -375,10 +402,10 @@ class _ProgressUI:
         except tk.TclError:
             self.root = None
             return
-        self.root.title("Universal Converter")
+        self.root.title("Transmute")
         self.root.geometry("620x320")
         self.root.configure(bg="#15151f")
-        title = tk.Label(self.root, text="Universal Converter — Starting up",
+        title = tk.Label(self.root, text="Transmute — Starting up",
                          fg="#e8e8f0", bg="#15151f", font=("Segoe UI", 13, "bold"))
         title.pack(pady=(14, 8), padx=14, anchor="w")
         sub = tk.Label(self.root,
@@ -437,6 +464,10 @@ def main() -> int:
         # 4. DejaVuSans.ttf — auto-fetch (PDF Unicode coverage)
         if _find_dejavu() is None:
             _install_dejavu(ui.log)
+
+        # 4b. Cinzel-Regular.ttf — auto-fetch (UI title font)
+        if _find_cinzel() is None:
+            _install_cinzel(ui.log)
 
         # 5. Hardware encoder probe
         ffmpeg = _find_ffmpeg()

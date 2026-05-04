@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QPropertyAnimation, Property
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QPainter, QPen, QColor
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QWidget, QVBoxLayout
+
+from ..utils.paths import resources_dir
 
 
 class DropZone(QWidget):
@@ -21,7 +24,7 @@ class DropZone(QWidget):
         layout.setContentsMargins(20, 18, 20, 18)
         self.label = QLabel("Drag & drop files or folders here, or click to browse.")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet("color: #b0b0c0; font-size: 14px;")
+        self.label.setStyleSheet("color: #b0b0c0; font-size: 14px; background: transparent;")
         layout.addWidget(self.label, 1)
 
         bottom = QHBoxLayout()
@@ -35,10 +38,36 @@ class DropZone(QWidget):
 
         self._hover = False
 
+        # Watermark: render logo.svg behind the text when the playlist is
+        # empty. Opacity is animated by main_window via set_watermark_opacity()
+        # so the mark fades out smoothly when files are added.
+        svg_path = resources_dir() / "logo.svg"
+        self._svg = QSvgRenderer(str(svg_path)) if svg_path.exists() else None
+        self._wm_opacity = 0.13  # base resting opacity
+        self._wm_anim = QPropertyAnimation(self, b"watermarkOpacity")
+        self._wm_anim.setDuration(450)
+
+    def get_watermark_opacity(self) -> float:
+        return self._wm_opacity
+
+    def set_watermark_opacity(self, val: float) -> None:
+        self._wm_opacity = max(0.0, min(1.0, float(val)))
+        self.update()
+
+    watermarkOpacity = Property(float, get_watermark_opacity, set_watermark_opacity)
+
+    def fade_watermark(self, target: float) -> None:
+        """Animate the watermark to `target` opacity. Called by main_window
+        when the playlist transitions empty<->non-empty."""
+        self._wm_anim.stop()
+        self._wm_anim.setStartValue(self._wm_opacity)
+        self._wm_anim.setEndValue(target)
+        self._wm_anim.start()
+
     def sizeHint(self) -> QSize:
         return QSize(800, 130)
 
-    # --- painting (dashed border) -------------------------------------------------
+    # --- painting (dashed border + watermark) ------------------------------------
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -49,6 +78,18 @@ class DropZone(QWidget):
         p.setBrush(bg)
         rect = self.rect().adjusted(2, 2, -2, -2)
         p.drawRoundedRect(rect, 10, 10)
+
+        # Watermark: low-opacity logo centered behind the prompt text
+        if self._svg is not None and self._wm_opacity > 0.001:
+            p.save()
+            p.setOpacity(self._wm_opacity)
+            # Square target sized to fit the zone height with 12px margin
+            side = max(40, min(self.height() - 24, self.width() - 24))
+            x = (self.width() - side) / 2
+            y = (self.height() - side) / 2
+            from PySide6.QtCore import QRectF
+            self._svg.render(p, QRectF(x, y, side, side))
+            p.restore()
         super().paintEvent(event)
 
     # --- drag/drop ---------------------------------------------------------------

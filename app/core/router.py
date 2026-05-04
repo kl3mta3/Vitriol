@@ -38,11 +38,21 @@ def convert_file(
     if warnings is None:
         warnings = []
 
-    # Masquerade short-circuit: any pair where one side is a masquerade host
-    # routes through the byte-envelope engine.
+    # Philosopher's Stone short-circuit. Two engagement conditions:
+    #   1. dst is a Stone host (we want to embed src bytes into it) AND src
+    #      is not a lossy format (lossy sources are excluded from Stone).
+    #   2. src is a Stone-host extension AND it actually contains a UCMSv1
+    #      envelope (we want to extract). A vanilla PNG / WAV / etc. with no
+    #      envelope falls through to the regular handler so PNG → JPG, WAV →
+    #      MP3, etc. keep working normally even with Stone enabled.
     if masquerade:
         from ..format_handlers import masquerade as _msq
-        if _msq.can_embed_into(dst_ext) or _msq.can_extract_from(src_ext):
+        engage = False
+        if _msq.can_embed_into(dst_ext) and not _msq.is_lossy(src_ext):
+            engage = True
+        elif _msq.can_extract_from(src_ext) and _msq.has_envelope(src, src_ext):
+            engage = True
+        if engage:
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress)
             return
 
