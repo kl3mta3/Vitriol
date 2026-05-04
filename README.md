@@ -99,7 +99,7 @@ resources/                    Bundled fonts (DejaVuSans.ttf for PDF Unicode)
 output/                       Default output directories per category
 ```
 
-## v1 scope cuts
+## v1 scope cuts 
 
 - **PPTX, ODT**: read-only.
 - **RTF**: read via `striprtf` (preferred) or a from-scratch fallback. Write deferred.
