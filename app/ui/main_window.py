@@ -38,9 +38,42 @@ from .drop_zone import DropZone
 from .playlist import Playlist
 from .playlist_item import PlaylistItemWidget, Status
 from .vignette import VignetteOverlay
+from .border_frame import BorderFrame
 from . import dialogs
 from ..core.conversion_queue import ConversionQueue
 from ..utils import settings
+
+
+def _logo_label(size_px: int = 28, boost: bool = False) -> QLabel | None:
+    """Render resources/logo.svg into a small QLabel pixmap. Returns None
+    if the SVG is missing.
+
+    `boost=True` paints the SVG twice — once at full opacity and again at
+    half opacity over the top — which thickens the perceived stroke weight
+    and makes the icon read brighter at small sizes. Used for the title-bar
+    icon so it has visual presence next to the Cinzel header."""
+    svg_path = resources_dir() / "logo.svg"
+    if not svg_path.exists():
+        return None
+    from PySide6.QtGui import QPixmap, QPainter
+    from PySide6.QtCore import QRectF
+    pm = QPixmap(size_px, size_px)
+    pm.fill(Qt.GlobalColor.transparent)
+    renderer = QSvgRenderer(str(svg_path))
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    renderer.render(painter, QRectF(0, 0, size_px, size_px))
+    if boost:
+        # Composite a second pass at reduced alpha to thicken/brighten the
+        # lines without altering the source SVG.
+        painter.setOpacity(0.55)
+        renderer.render(painter, QRectF(0, 0, size_px, size_px))
+    painter.end()
+    lbl = QLabel()
+    lbl.setFixedSize(size_px, size_px)
+    lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    lbl.setPixmap(pm)
+    return lbl
 
 
 def _gem_icon_label(size_px: int = 16) -> QLabel:
@@ -112,14 +145,25 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(16, 12, 16, 12)
+        # Margins clear the inscribed BorderFrame on the sides + top. The
+        # bottom margin is small because the QStatusBar lives below the
+        # central widget; the BorderFrame is parented to the QMainWindow
+        # itself so it wraps the status bar too — bottom border sits BELOW
+        # the "Ready." text, giving the bulk buttons a natural buffer.
+        outer.setContentsMargins(28, 28, 28, 6)
         outer.setSpacing(10)
-        # Atmosphere overlay — paint-only, click-through, resizes with central.
-        # Created here so the rest of _build_ui's widgets stack underneath.
-        self._vignette = VignetteOverlay(central)
 
         # Top bar: title + global toggles (Philosopher's Stone, Verify Round-Trip).
         topbar = QHBoxLayout()
+        # Title cluster (icon + label) gets its own tight sub-layout so the
+        # icon sits close to the text without affecting the topbar's wider
+        # spacing between the title cluster and the toggles on the right.
+        title_box = QHBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(8)
+        title_icon = _logo_label(38, boost=True)
+        if title_icon is not None:
+            title_box.addWidget(title_icon)
         title = QLabel("Transmute")
         title.setObjectName("AppTitle")
         # Apply Cinzel (engraved-cap serif) to the title only — the rest of
@@ -133,7 +177,8 @@ class MainWindow(QMainWindow):
             title.setStyleSheet(
                 "color: #e8e8f0; padding: 6px 4px 6px 4px;"
             )
-        topbar.addWidget(title)
+        title_box.addWidget(title)
+        topbar.addLayout(title_box)
         topbar.addStretch(1)
 
         # Wrapped in <p style="width: 280px"> so Qt treats them as rich text and
@@ -153,10 +198,6 @@ class MainWindow(QMainWindow):
             "verification passes."
             "</p>"
         )
-
-        # Gem icon sits to the LEFT of the Stone label, visible only when active.
-        self.gem_icon = _gem_icon_label(16)
-        topbar.addWidget(self.gem_icon)
 
         self.chk_stone = QCheckBox("Philosopher's Stone")
         self.chk_stone.setObjectName("StoneToggle")
@@ -207,6 +248,23 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready.")
+        # Push the status bar text up so the inscribed BorderFrame's bottom
+        # edge sits well BELOW "Ready." with clear space between them.
+        # Left margin keeps the text from clipping the left border line;
+        # bottom margin nudges the text upward inside the bar.
+        self.statusBar().setContentsMargins(18, 0, 0, 35)
+        self.statusBar().setMinimumHeight(52)
+
+        # Inscribed manuscript border + vignette parented to the QMainWindow
+        # itself so they wrap the entire window including the status bar.
+        # The bottom border line ends up BELOW the "Ready." text, which gives
+        # the bulk buttons a natural buffer above the bottom glyph row.
+        # raise_() keeps them above siblings so they paint over the status
+        # bar's QSS background.
+        self._border = BorderFrame(self)
+        self._vignette = VignetteOverlay(self)
+        self._border.raise_()
+        self._vignette.raise_()
 
     # --- Wiring ------------------------------------------------------------
     def _wire_queue(self) -> None:
@@ -277,9 +335,9 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_stone_visuals(self) -> None:
-        """Sync the gem icon visibility + the active QSS state of the toggle."""
+        """Sync the active QSS state of the Stone toggle. The hex indicator
+        carries the visual cue now — no separate icon to manage."""
         active = self.chk_stone.isChecked()
-        self.gem_icon.setVisible(active)
         self.chk_stone.setProperty("stoneActive", "true" if active else "false")
         # Re-polish so the dynamic property selector kicks in.
         self.chk_stone.style().unpolish(self.chk_stone)

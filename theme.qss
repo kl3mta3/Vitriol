@@ -27,6 +27,9 @@ QPushButton {
     border: 1px solid #2a2a3a;
     border-radius: 6px;
     padding: 6px 14px;
+	font-family: "Cinzel";
+    font-size: 10pt;
+	font-weight: 600;
 }
 QPushButton:hover { background-color: #2a2a3a; border-color: #3b82f6; }
 QPushButton:pressed { background-color: #15151f; }
@@ -66,6 +69,7 @@ QPushButton#RowConvert {
     border: 1px solid #8b5cf6;
     border-radius: 6px;
     padding: 4px 10px;
+	font-size: 8pt;
     min-height: 22px;
 }
 QPushButton#RowConvert:hover { background-color: #9d72ff; }

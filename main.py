@@ -27,10 +27,16 @@ def _load_stylesheet(app: QApplication) -> None:
 
 
 def _load_app_icon(app: QApplication) -> None:
-    """Set the app/window icon from resources/logo.svg. QIcon supports SVG
-    natively via the QtSvg plugin; Qt will rasterize at the size each
-    surface (taskbar, alt-tab, window title) requests."""
-    svg = resources_dir() / "logo.svg"
+    """Set the app/window icon. Prefers the multi-resolution .ico (Windows
+    picks the right embedded frame per surface — taskbar, alt-tab, title bar,
+    file-explorer thumbnail), falls back to the SVG if the .ico hasn't been
+    generated yet (run `python tools/generate_icons.py` to produce it)."""
+    res = resources_dir()
+    ico = res / "icons" / "logo.ico"
+    if ico.exists():
+        app.setWindowIcon(QIcon(str(ico)))
+        return
+    svg = res / "logo.svg"
     if svg.exists():
         app.setWindowIcon(QIcon(str(svg)))
 

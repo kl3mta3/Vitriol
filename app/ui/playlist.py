@@ -3,10 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QRectF
+from PySide6.QtGui import QPainter
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QLabel, QListWidget, QListWidgetItem, QStackedLayout, QVBoxLayout, QWidget
 
 from .playlist_item import PlaylistItemWidget, Status
+from ..utils.paths import resources_dir
 
 
 class Playlist(QFrame):
@@ -28,6 +31,9 @@ class Playlist(QFrame):
         self.list.setUniformItemSizes(False)
         self.list.setSpacing(2)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        # Make the list transparent so the parent's watermark shows through.
+        self.list.setStyleSheet("QListWidget { background: transparent; }")
+        self.list.viewport().setStyleSheet("background: transparent;")
 
         self.empty = QLabel("No files added yet.")
         self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -36,6 +42,12 @@ class Playlist(QFrame):
         self._stack.addWidget(self.empty)
         self._stack.addWidget(self.list)
         self._sync_empty()
+
+        # Logo watermark painted in this frame's background — fills the empty
+        # space behind playlist items so the area never reads as a void.
+        svg_path = resources_dir() / "logo.svg"
+        self._svg = QSvgRenderer(str(svg_path)) if svg_path.exists() else None
+        self._wm_opacity = 0.07  # quiet — items overlay this without losing legibility
 
     def add_paths(self, paths: Iterable[Path], masquerade: bool = False) -> None:
         added = 0
@@ -80,6 +92,24 @@ class Playlist(QFrame):
                 break
         self._sync_empty()
         self.items_changed.emit()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        # QFrame paints its QSS background first.
+        super().paintEvent(event)
+        if self._svg is None or self._wm_opacity <= 0.001:
+            return
+        # Center a square watermark sized to fit the smaller dimension with
+        # ~20px breathing room. Capped at 360 so it stays elegant on huge
+        # windows.
+        rect = self.rect()
+        side = max(120, min(rect.width() - 40, rect.height() - 40, 360))
+        x = (rect.width() - side) / 2
+        y = (rect.height() - side) / 2
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setOpacity(self._wm_opacity)
+        self._svg.render(p, QRectF(x, y, side, side))
+        p.end()
 
     def _on_remove(self, widget: PlaylistItemWidget) -> None:
         if widget.is_running():

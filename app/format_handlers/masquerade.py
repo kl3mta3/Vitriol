@@ -269,9 +269,9 @@ def _txt_embed(src_bytes: bytes, src_ext: str) -> bytes:
     # Wrap to 76 cols + a tiny header so a casual viewer sees what it is
     chunks = [body[i:i + 76] for i in range(0, len(body), 76)]
     header = (
-        f"# Universal Converter masquerade envelope ({src_ext})\n"
+        f"# Transmute Philosopher's Stone envelope ({src_ext})\n"
         f"# This file holds the original payload base64-encoded inside a UCMSv1 envelope.\n"
-        f"# Convert it back through Universal Converter (Masquerade Mode on) to recover the source.\n"
+        f"# Convert it back through Transmute (Philosopher's Stone on) to recover the source.\n"
     )
     return (header + "\n".join(chunks) + "\n").encode("utf-8")
 
