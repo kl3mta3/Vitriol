@@ -37,7 +37,16 @@ DOC_KIND = "text"
 def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
     """Try pdfminer.six first; fall back to the recoded extractor only if
     pdfminer can't be imported (e.g. user ran main.py before the launcher's
-    pip install completed)."""
+    pip install completed).
+
+    Trailer-envelope fast path: if the PDF was produced by Transmute from
+    an off-type source (e.g. PNG -> PDF), the original source bytes are
+    appended after %%EOF as a UCMSv1 envelope. Recover those directly so
+    the round-trip is byte-perfect with no quality loss from re-extraction.
+    """
+    origin = _try_read_trailer_envelope(path)
+    if origin is not None:
+        return _wrap_recovered_origin(*origin)
     try:
         import pdfminer  # noqa: F401  — just probing availability
         doc = _extract_via_pdfminer(path, cancel)
@@ -57,6 +66,68 @@ def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
             "Result may be incomplete."
         )
         return doc
+
+
+def _try_read_trailer_envelope(path: Path) -> Optional[tuple[bytes, str]]:
+    """Scan the tail of the PDF for a UCMSv1 envelope appended after %%EOF.
+    Returns (payload, src_ext) on success; None if no trailer or invalid.
+
+    Strategy: scan the last ~64 KB for the envelope's MAGIC bytes
+    (`UCMSv1\\0`) rather than anchoring on `%%EOF`. The MAGIC is much more
+    distinctive — the chance of a coincidental occurrence in a normal PDF
+    body is negligible. Anchoring on `%%EOF` could be fooled by foreign
+    PDFs whose content streams contain that literal substring.
+
+    Reads at most 64 MB. Envelopes larger than that skip this fast path
+    (the regular pdfminer extraction still works on the document's visible
+    content; the trailer would still be valid but won't be detected via
+    the fast path).
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size < 32:
+        return None
+    read_limit = min(size, 64 * 1024 * 1024)
+    try:
+        with open(path, "rb") as f:
+            if size <= read_limit:
+                blob = f.read()
+            else:
+                f.seek(-read_limit, 2)
+                blob = f.read()
+    except OSError:
+        return None
+    try:
+        from .masquerade import MAGIC, _parse_envelope
+    except ImportError:
+        return None
+    # Find the LAST occurrence of the envelope MAGIC. Trailers we write
+    # are always at the very end, so the last match is ours; any earlier
+    # match (extremely unlikely in a normal PDF) is ignored.
+    pos = blob.rfind(MAGIC)
+    if pos < 0:
+        return None
+    try:
+        return _parse_envelope(blob[pos:])
+    except ValueError:
+        return None
+
+
+def _wrap_recovered_origin(payload: bytes, src_ext: str) -> TextDoc:
+    """Wrap recovered original-source bytes as a TextDoc the router can
+    forward to any image writer (or onward Stone host) without losing
+    bytes. The metadata's `_transmute_origin` lets a downstream PDF write
+    re-emit the trailer if the user does PDF -> PDF conversion."""
+    from ..core.intermediate import _EXT_TO_MIME
+    ext = src_ext.lower()
+    if not ext.startswith("."):
+        ext = "." + ext
+    mime = _EXT_TO_MIME.get(ext, "application/octet-stream")
+    doc = TextDoc(blocks=[Image(data=payload, mime=mime, alt=f"image{ext}")])
+    doc.metadata["_transmute_origin"] = {"bytes": payload, "ext": ext}
+    return doc
 
 
 def _annotate_low_extraction_warning(doc: TextDoc, path: Path) -> None:

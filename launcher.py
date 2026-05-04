@@ -78,6 +78,10 @@ REQUIRED_PY = [
     ("striprtf", "striprtf>=0.0.26"),
     ("psutil", "psutil>=5.9"),
     ("pdfminer", "pdfminer.six>=20221105"),
+    # Used by the Stone Mandelbrot keystream generator. NumPy makes
+    # full-image-size fractal generation feasible (~0.3-0.6 sec for 1080²
+    # vs. 30+ sec in pure Python).
+    ("numpy", "numpy>=1.24"),
 ]
 
 
@@ -134,31 +138,14 @@ CINZEL_URL = "https://github.com/google/fonts/raw/main/ofl/cinzel/Cinzel%5Bwght%
 CINZEL_SHA = ""
 
 
+# Both _find_ffmpeg and _find_assimp delegate to the canonical helpers in
+# app.utils.paths so the launcher and runtime use identical lookup logic.
 def _find_ffmpeg() -> Optional[Path]:
-    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-    # Primary: user_data bin (where new installs land). Fallback: app-relative
-    # bin/ (where pre-refactor / portable installs may have it). Last: PATH.
-    for d in (BIN, ROOT / "bin"):
-        c = d / name
-        if c.exists():
-            return c
-    found = shutil.which("ffmpeg")
-    return Path(found) if found else None
+    return _paths.find_ffmpeg()
 
 
 def _find_assimp() -> Optional[Path]:
-    names = ("assimp-vc143-mt.dll", "assimp.dll", "libassimp.dll",
-             "libassimp.so", "libassimp.dylib")
-    for d in (BIN, ROOT / "bin"):
-        for name in names:
-            c = d / name
-            if c.exists():
-                return c
-    env = os.environ.get("ASSIMP_DLL") or os.environ.get("ASSIMP_PATH")
-    if env and Path(env).exists():
-        return Path(env)
-    found = shutil.which("assimp-vc143-mt") or shutil.which("assimp")
-    return Path(found) if found else None
+    return _paths.find_assimp()
 
 
 def _find_dejavu() -> Optional[Path]:
@@ -477,7 +464,15 @@ def main() -> int:
             return 1
 
     env = os.environ.copy()
-    env["UC_BIN_DIR"] = str(BIN)
+    # Point the runtime at the directory where we ACTUALLY found ffmpeg (and
+    # assimp), not blindly at the LocalAppData bin/. Fixes the long-standing
+    # bug where the launcher would discover ffmpeg in <repo>/bin/ but the
+    # runtime would only check %LOCALAPPDATA%/Transmute/bin and fail.
+    ff = _find_ffmpeg()
+    ai = _find_assimp()
+    env["UC_BIN_DIR"] = str(ff.parent if ff else BIN)
+    if ai:
+        env["UC_ASSIMP_DIR"] = str(ai.parent)
     env["UC_HW_CACHE"] = str(HW_CACHE)
     env["UC_RESOURCES_DIR"] = str(RESOURCES)
     env["UC_USER_DATA_DIR"] = str(USER_DATA)

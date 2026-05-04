@@ -83,6 +83,11 @@ class _PdfWriter:
         # Cache: id(Image) → object number. Lets the same Image block embedded
         # multiple times reuse one /XObject instead of duplicating data.
         self._image_xobject_cache: dict[int, int] = {}
+        # Trailer envelope source — populated by render() from doc.metadata
+        # ["_transmute_origin"]. When set, save() appends a UCMSv1 envelope
+        # of the original source bytes after the PDF's %%EOF marker so the
+        # original file (e.g. the source PNG) can be recovered byte-perfect.
+        self._origin: Optional[dict] = None
         self._cursor_y = PAGE_H - MARGIN_T
         self._dejavu_ttf, self._dejavu_font = self._load_dejavu()
         # F1=Helvetica, F2=Helvetica-Bold, F3=Helvetica-Oblique, F4=Courier,
@@ -102,6 +107,12 @@ class _PdfWriter:
 
     # --- Public render -----------------------------------------------------
     def render(self, doc: TextDoc, cancel: CancellationToken) -> None:
+        # Capture the trailer-envelope origin if the IR adapter set one.
+        meta = getattr(doc, "metadata", None)
+        if isinstance(meta, dict):
+            origin = meta.get("_transmute_origin")
+            if isinstance(origin, dict) and "bytes" in origin and "ext" in origin:
+                self._origin = origin
         for blk in doc.blocks:
             cancel.check()
             self._render_block(blk, indent=0)
@@ -365,7 +376,17 @@ class _PdfWriter:
         self._set(catalog_no,
                   f"{catalog_no} 0 obj\n<< /Type /Catalog /Pages {pages_no} 0 R >>\nendobj\n".encode("latin-1"))
 
-        path.write_bytes(self._serialize(catalog_no))
+        pdf_bytes = self._serialize(catalog_no)
+        # Off-type round-trip: when this PDF was produced from an image
+        # source via image_bytes_to_textdoc, append a UCMSv1 envelope of
+        # the original bytes after %%EOF. PDF spec section 7.5.5 says
+        # readers locate %%EOF from the back of the file and ignore
+        # trailing bytes, so the envelope is invisible to viewers but
+        # lets pdf_read recover the original source byte-perfect.
+        if self._origin is not None:
+            from .masquerade import _build_envelope
+            pdf_bytes += _build_envelope(self._origin["bytes"], self._origin["ext"])
+        path.write_bytes(pdf_bytes)
 
     # --- Object table helpers ---------------------------------------------
     def _reserve(self) -> int:

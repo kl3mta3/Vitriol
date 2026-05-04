@@ -109,25 +109,41 @@ class PlaylistItemWidget(QWidget):
         self.dst_combo.setMinimumWidth(82)
         layout.addWidget(self.dst_combo)
 
-        # 6. Save-over-original checkbox
-        self.over_checkbox = QCheckBox("Save over original")
+        # 6. Overwrite checkbox (saves over original; tooltip explains)
+        self.over_checkbox = QCheckBox("Overwrite")
+        self.over_checkbox.setToolTip("save over original")
         self.over_checkbox.toggled.connect(self._toggle_save_field)
         layout.addWidget(self.over_checkbox)
+
+        # 6b. Compiler checkbox — only visible when the target is .py.
+        # When ON, the .py output is a self-extracting Stone script that
+        # reconstructs the source when run. When OFF, the .py is just the
+        # source's text content saved with a .py extension (will likely
+        # not be runnable Python for non-text sources, but matches what
+        # the user picked). Independent of the global Stone toggle.
+        self.compiler_checkbox = QCheckBox("Compiler")
+        self.compiler_checkbox.setToolTip(
+            "Output a self-extracting .py script that reconstructs the "
+            "original file when run with Python."
+        )
+        self.compiler_checkbox.setVisible(False)
+        layout.addWidget(self.compiler_checkbox)
 
         # 7. Save location field — stretches to fill remaining width.
         # Path text is ellipsized when the field is too narrow; full path
         # appears as tooltip on hover. Stretch factor 1 keeps it taking
-        # the bulk of the row's free space.
+        # the bulk of the row's free space. Min width drops a bit to make
+        # room for the optional Compiler toggle without overflowing.
         self.save_field = QLineEdit()
         self.save_field.setReadOnly(True)
-        self.save_field.setMinimumWidth(180)
+        self.save_field.setMinimumWidth(140)
         self.save_field.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_field.mousePressEvent = self._pick_dir  # type: ignore[assignment]
         self._set_save_field_path(str(self._default_save_dir()))
         layout.addWidget(self.save_field, 1)
 
-        # 8. Convert / Stop button
-        self.convert_btn = QPushButton("Convert")
+        # 8. Transmute / Stop button
+        self.convert_btn = QPushButton("Transmute")
         self.convert_btn.setObjectName("RowConvert")
         self.convert_btn.clicked.connect(self._on_convert_or_stop)
         layout.addWidget(self.convert_btn)
@@ -151,6 +167,7 @@ class PlaylistItemWidget(QWidget):
         # Save folder follows the *target* extension's category, not the
         # source's — so .txt → .wav saves to output/Audio/, not output/Text/.
         self._refresh_save_field()
+        self.compiler_checkbox.setVisible(self.target_ext() == ".py")
         self.dst_combo.currentTextChanged.connect(self._on_target_changed)
 
     # --- public API ---------------------------------------------------------
@@ -181,6 +198,13 @@ class PlaylistItemWidget(QWidget):
 
     def save_over_original(self) -> bool:
         return self.over_checkbox.isChecked()
+
+    def compiler_enabled(self) -> bool:
+        """True only when the row is targeting .py and the per-row Compiler
+        toggle is on. Otherwise the queue treats this as a normal conversion."""
+        if self.target_ext() != ".py":
+            return False
+        return self.compiler_checkbox.isChecked()
 
     def set_status(self, status: Status, error_msg: str | None = None) -> None:
         self._status = status
@@ -214,7 +238,7 @@ class PlaylistItemWidget(QWidget):
             self.convert_btn.setText("Stop")
             self.convert_btn.setObjectName("RowStop")
         else:
-            self.convert_btn.setText("Convert")
+            self.convert_btn.setText("Transmute")
             self.convert_btn.setObjectName("RowConvert")
         self.convert_btn.style().unpolish(self.convert_btn)
         self.convert_btn.style().polish(self.convert_btn)
@@ -271,6 +295,11 @@ class PlaylistItemWidget(QWidget):
 
     def _on_target_changed(self, _new_text: str) -> None:
         self._refresh_save_field()
+        # Show the Compiler toggle only when .py is the target.
+        is_py = (self.target_ext() == ".py")
+        self.compiler_checkbox.setVisible(is_py)
+        if not is_py:
+            self.compiler_checkbox.setChecked(False)
 
     def _toggle_save_field(self, checked: bool) -> None:
         self.save_field.setVisible(not checked)

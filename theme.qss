@@ -51,6 +51,23 @@ QPushButton#Secondary {
 }
 QPushButton#Secondary:hover { background-color: #5a98f9; }
 
+/* Icon-only Browse-folder button on the DropZone. Transparent so it sits
+   quietly inside the dotted drop area; subtle outline appears on hover so
+   it still reads as clickable. */
+QPushButton#BrowseFolder {
+    background-color: transparent;
+    border: 1px solid transparent;
+    padding: 4px;
+}
+QPushButton#BrowseFolder:hover {
+    background-color: #1f1f2e;
+    border-color: #3a3a52;
+}
+QPushButton#BrowseFolder:pressed {
+    background-color: #15151f;
+    border-color: #2a2a3a;
+}
+
 QPushButton#Danger {
     background-color: #c0392b;
     border: 1px solid #c0392b;

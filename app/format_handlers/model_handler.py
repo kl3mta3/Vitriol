@@ -59,21 +59,10 @@ _dll: Optional[ctypes.CDLL] = None
 
 
 def _find_dll_path() -> Optional[Path]:
-    candidates = [
-        bin_dir() / "assimp-vc143-mt.dll",
-        bin_dir() / "assimp.dll",
-        bin_dir() / "libassimp.dll",
-        bin_dir() / "libassimp.so",
-        bin_dir() / "libassimp.dylib",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    env = os.environ.get("ASSIMP_DLL") or os.environ.get("ASSIMP_PATH")
-    if env and Path(env).exists():
-        return Path(env)
-    found = shutil.which("assimp-vc143-mt") or shutil.which("assimp")
-    return Path(found) if found else None
+    """Delegates to paths.find_assimp() so launcher and runtime use the
+    same lookup logic."""
+    from ..utils.paths import find_assimp
+    return find_assimp()
 
 
 def _load() -> ctypes.CDLL:

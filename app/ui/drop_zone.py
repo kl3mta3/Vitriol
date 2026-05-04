@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Iterable
 
 from PySide6.QtCore import Qt, Signal, QSize, QPropertyAnimation, Property
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QPainter, QPen, QColor
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent, QPainter, QPen, QColor, QIcon, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QFileDialog, QHBoxLayout, QLabel, QPushButton, QWidget, QVBoxLayout
 
@@ -29,9 +29,14 @@ class DropZone(QWidget):
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        self.browse_btn = QPushButton("Browse…")
-        self.browse_btn.setObjectName("Secondary")
+        self.browse_btn = QPushButton()
+        self.browse_btn.setObjectName("BrowseFolder")
         self.browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browse_btn.setToolTip("Browse for files or folders")
+        self.browse_btn.setIcon(_render_folder_icon(28))
+        self.browse_btn.setIconSize(QSize(28, 28))
+        # Compact icon-only button: square footprint, no text padding.
+        self.browse_btn.setFixedSize(QSize(40, 40))
         self.browse_btn.clicked.connect(self._browse)
         bottom.addWidget(self.browse_btn)
         layout.addLayout(bottom)
@@ -136,3 +141,19 @@ class DropZone(QWidget):
         if p.is_file():
             return [p]
         return []
+
+
+def _render_folder_icon(size: int) -> QIcon:
+    """Render the muted folder.svg into a QIcon at the requested size."""
+    svg_path = resources_dir() / "folder.svg"
+    if not svg_path.exists():
+        return QIcon()
+    renderer = QSvgRenderer(str(svg_path))
+    pix = QPixmap(size, size)
+    pix.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    renderer.render(p)
+    p.end()
+    return QIcon(pix)

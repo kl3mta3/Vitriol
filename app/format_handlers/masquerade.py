@@ -47,7 +47,14 @@ MAGIC_V2 = b"UCMSv2\0\0"  # 8 bytes — tiered-image-dimensions envelope (PNG/BM
 
 # Read-write capable host extensions. Used by the registry + dropdown filter
 # when Philosopher's Stone (a.k.a. Masquerade) mode is on.
-TARGETS = {".wav", ".png", ".bmp", ".txt", ".mkv", ".py"}
+TARGETS = {".wav", ".png", ".bmp", ".txt", ".mkv", ".py",
+           ".ply", ".obj", ".glb",
+           ".aiff", ".flac"}
+# .fbx is intentionally excluded as a Stone host (autodesk-proprietary
+# binary; readers are notoriously strict, no clean place to drop a payload).
+# .flac is a Stone host but only via the music encoder (cross-category) —
+# the WAV music output is re-encoded to FLAC via FFmpeg, and the inverse
+# decode path uses FFmpeg → WAV → music extract.
 
 # Lossy source extensions excluded from Stone mode entirely. The bytes of a
 # JPG/MP3/MP4 file *can* technically be embedded into a Stone host and
@@ -107,41 +114,168 @@ def has_envelope(path: "Path", ext: str) -> bool:
     # as UTF-8 in the EBML Tags section, near the file start.
     if ext == ".mkv" and b"UCMSv1" in head:
         return True
-    # TXT host: the envelope is base64-encoded, so MAGIC bytes don't appear
-    # in raw form. Detect via the literal comment header we always write.
-    if ext == ".txt" and b"Transmute Philosopher's Stone envelope" in head:
+    # PLY / OBJ hosts: envelope is base64'd inside `comment` / `#` lines.
+    # Look for the tagged comment prefix.
+    if ext == ".ply" and b"comment uc " in head:
         return True
+    if ext == ".obj" and b"# uc " in head:
+        return True
+    # FLAC host: detection requires FFmpeg-decoding to WAV first (FLAC
+    # stream format is too complex to inspect cheaply). We only do this
+    # when the file's actual magic is fLaC AND the caller has Stone on
+    # (the calling site, not has_envelope itself, gates this).
+    if ext == ".flac" and head[:4] == b"fLaC":
+        try:
+            import tempfile
+            tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
+            try:
+                _flac_to_wav_via_ffmpeg(Path(path), tmp_wav)
+                # Recursively check the temp WAV. The has_envelope call
+                # for .wav covers both classic and music modes.
+                return has_envelope(tmp_wav, ".wav")
+            finally:
+                try: tmp_wav.unlink()
+                except OSError: pass
+        except Exception:
+            return False
+    # AIFF music host: same scheme as WAV music but big-endian PCM in
+    # FORM/AIFF/SSND container. Detect via SSND-data music header probe.
+    if ext == ".aiff":
+        try:
+            full = open(path, "rb").read()
+            if full[:4] == b"FORM" and full[8:12] == b"AIFF":
+                p = 12
+                num_channels = bits_per_sample = sample_rate = None
+                ssnd_blob = None
+                while p + 8 <= len(full):
+                    ck_id = full[p:p + 4]
+                    ck_size = struct.unpack(">I", full[p + 4:p + 8])[0]
+                    if ck_id == b"COMM" and ck_size >= 18:
+                        comm = full[p + 8:p + 8 + ck_size]
+                        num_channels, _nf, bits_per_sample = struct.unpack(
+                            ">hI h", comm[:8])
+                        sample_rate = _aiff_parse_extended_float(comm[8:18])
+                    elif ck_id == b"SSND":
+                        ssnd_blob = full[p + 8:p + 8 + ck_size][8:]  # strip offset+blockSize
+                        break
+                    p += 8 + ck_size + (ck_size & 1)
+                # Plain UCMSv1 envelope check first (same-category AIFF).
+                if ssnd_blob and (MAGIC in ssnd_blob[:64*1024]):
+                    return True
+                # Music mode probe.
+                if ssnd_blob and (sample_rate, num_channels, bits_per_sample) == (44100, 2, 16):
+                    if len(ssnd_blob) >= 12 * 4:
+                        header_bytes = bytearray()
+                        for i in range(12):
+                            off = i * 4
+                            left, right = struct.unpack(">hh", ssnd_blob[off:off + 4])
+                            header_bytes.append(((right & 0x0F) << 4) | (left & 0x0F))
+                        if bytes(header_bytes[:4]) == b"uM01":
+                            return True
+        except (OSError, struct.error):
+            pass
+    # WAV music host: bottom 4 bits of stereo samples carry payload bytes;
+    # MAGIC doesn't appear in raw bytes. Detect by reading the WAV format
+    # chunk + first ~16 frames and checking for the music-payload magic.
+    if ext == ".wav":
+        try:
+            full = open(path, "rb").read()
+            # Need WAV format chunk to know endianness/channel layout.
+            if full[:4] == b"RIFF" and full[8:12] == b"WAVE":
+                p = 12
+                sample_rate = num_channels = bits_per_sample = None
+                data_blob = None
+                while p + 8 <= len(full):
+                    ck_id = full[p:p + 4]
+                    ck_size = struct.unpack("<I", full[p + 4:p + 8])[0]
+                    if ck_id == b"fmt ":
+                        fmt = full[p + 8:p + 8 + ck_size]
+                        if len(fmt) >= 16:
+                            _, num_channels, sample_rate, _, _, bits_per_sample = (
+                                struct.unpack("<HHIIHH", fmt[:16]))
+                    elif ck_id == b"data":
+                        data_blob = full[p + 8:p + 8 + ck_size]
+                        break
+                    p += 8 + ck_size + (ck_size & 1)
+                if data_blob and (sample_rate, num_channels, bits_per_sample) == (44100, 2, 16):
+                    # Probe the music-mode header
+                    if len(data_blob) >= 12 * 4:
+                        from . import _music as _m
+                        header_bytes = bytearray()
+                        for i in range(12):
+                            off = i * 4
+                            left, right = struct.unpack("<hh", data_blob[off:off + 4])
+                            header_bytes.append(((right & 0x0F) << 4) | (left & 0x0F))
+                        if bytes(header_bytes[:4]) == b"uM01":
+                            return True
+        except (OSError, struct.error):
+            pass
+    # TXT host: the envelope is base64-encoded, so MAGIC bytes don't appear
+    # in raw form. The file carries no comment header (deliberately — the
+    # output should look like an unremarkable base64 dump). Detect by
+    # attempting a base64 decode of the head and checking for MAGIC.
+    if ext == ".txt":
+        try:
+            text = head.decode("ascii", errors="strict")
+            stitched = "".join(ln.strip() for ln in text.splitlines()
+                               if ln.strip() and not ln.startswith("#"))
+            # Decode just enough to inspect the prefix; pad to a multiple of 4.
+            probe = stitched[: (len(stitched) // 4) * 4]
+            if probe:
+                decoded = base64.b64decode(probe, validate=False)
+                if decoded.startswith(MAGIC) or decoded.startswith(MAGIC_V2):
+                    return True
+        except (UnicodeDecodeError, ValueError):
+            pass
     # PNG/BMP v2: magic is buried in pixel data which may be deflate-compressed
     # for PNG. For PNG we can't cheaply scan compressed IDATs; do a small
     # decode of the first IDAT and look for v2 magic in the first ~64 KB of
     # decompressed pixel bytes.
+    #
+    # Dual-attempt: a Mandelbrot-XOR'd PNG (cross-category Stone) won't show
+    # MAGIC_V2 in raw pixel bytes. We need to also scan the same buffer with
+    # the Mandelbrot inverse keystream applied, in case this is a cross-
+    # category Stone host.
     if ext == ".png":
         try:
             from .streaming_image import stream_png_read
-            _w, _h, it = stream_png_read(Path(path))
-            scratch = bytearray()
-            for chunk in it:
-                scratch.extend(chunk)
-                if MAGIC_V2 in scratch:
-                    return True
-                if len(scratch) > 64 * 1024:
-                    break
+            w, h, it = stream_png_read(Path(path))
+            return _v2_envelope_present_in_pixels(it, w, h)
         except Exception:
             return False
     if ext == ".bmp":
         try:
             from .streaming_image import stream_bmp_read
-            _w, _h, it = stream_bmp_read(Path(path))
-            scratch = bytearray()
-            for chunk in it:
-                scratch.extend(chunk)
-                if MAGIC_V2 in scratch:
-                    return True
-                if len(scratch) > 64 * 1024:
-                    break
+            w, h, it = stream_bmp_read(Path(path))
+            return _v2_envelope_present_in_pixels(it, w, h)
         except Exception:
             return False
     return False
+
+
+def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
+                                    probe_bytes: int = 64 * 1024) -> bool:
+    """Read up to `probe_bytes` of pixel data; return True if MAGIC_V2 is
+    present either in the raw stream (same-category Stone) OR in the
+    Mandelbrot-XOR'd stream (cross-category Stone aesthetic)."""
+    scratch = bytearray()
+    for chunk in pixel_iter:
+        scratch.extend(chunk)
+        if MAGIC_V2 in scratch:
+            return True
+        if len(scratch) >= probe_bytes:
+            break
+    if not scratch:
+        return False
+    # Mandelbrot inverse: XOR the same buffer prefix with the deterministic
+    # full-image RGB keystream and re-scan for magic. Only XOR the first
+    # min(scratch, keystream) bytes — magic is always at the start anyway.
+    keystream = _mandelbrot_keystream(width, height)
+    m = min(len(scratch), len(keystream))
+    xord = bytearray(m)
+    for i in range(m):
+        xord[i] = scratch[i] ^ keystream[i]
+    return MAGIC_V2 in xord
 
 # MKV host parameters. 42 fps is intentional — non-standard rate that
 # fingerprints Masquerade output: combined with the UCMSv1 magic in the
@@ -216,18 +350,283 @@ def _wav_embed(src_bytes: bytes, src_ext: str) -> bytes:
     return bytes(out)
 
 
+def _wav_embed_music(src_bytes: bytes, src_ext: str) -> bytes:
+    """Cross-category Stone audio target. Generate music samples with the
+    source bytes packed in the bottom 4 bits per sample."""
+    from . import _music as _m
+    env = _build_envelope(src_bytes, src_ext)
+    pcm, n_frames = _m.encode_music_payload(env)
+    sample_rate = _m.SAMPLE_RATE
+    num_channels = _m.CHANNELS
+    bits_per_sample = _m.BITS_PER_SAMPLE
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    data_size = len(pcm)
+    riff_size = 4 + (8 + 16) + (8 + data_size)
+    out = bytearray()
+    out += b"RIFF" + struct.pack("<I", riff_size) + b"WAVE"
+    out += b"fmt " + struct.pack("<I", 16)
+    out += struct.pack("<HHIIHH", 1, num_channels, sample_rate, byte_rate,
+                        block_align, bits_per_sample)
+    out += b"data" + struct.pack("<I", data_size) + pcm
+    return bytes(out)
+
+
+# ---------------------------------------------------------------------------
+# Host: AIFF (Apple/IFF audio container)
+# ---------------------------------------------------------------------------
+# Layout: FORM <size> AIFF [chunks]
+# Required chunks: COMM (parameters) and SSND (sample data).
+# Sample data is big-endian PCM. Chunks 4-byte aligned (pad with one zero
+# byte if odd-sized payload).
+
+def _aiff_pad(n: int) -> int:
+    return n & 1
+
+
+def _aiff_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    """Same-category AIFF: stash the UCMSv1 envelope verbatim into the
+    SSND chunk. Mirrors the classic _wav_embed approach.
+
+    The format is 8 kHz mono 16-bit (matches our WAV defaults — keeps the
+    payload-to-frames math identical for parity with WAV)."""
+    env = _build_envelope(src_bytes, src_ext)
+    if len(env) % 2:
+        env += b"\x00"  # 16-bit alignment
+    sample_rate = 8000
+    num_channels = 1
+    bits_per_sample = 16
+    n_frames = len(env) // (num_channels * (bits_per_sample // 8))
+    # COMM chunk: numChannels(2) numSampleFrames(4) sampleSize(2) sampleRate(10 IEEE 754 80-bit)
+    comm_data = (struct.pack(">hI h", num_channels, n_frames, bits_per_sample)
+                 + _aiff_extended_float(sample_rate))
+    if _aiff_pad(len(comm_data)):
+        comm_data += b"\x00"
+    # SSND chunk: offset(4) blockSize(4) sampleData(...)
+    ssnd_data = struct.pack(">II", 0, 0) + env
+    if _aiff_pad(len(ssnd_data)):
+        ssnd_data += b"\x00"
+    body = (b"AIFF"
+            + b"COMM" + struct.pack(">I", len(comm_data)) + comm_data
+            + b"SSND" + struct.pack(">I", len(ssnd_data)) + ssnd_data)
+    return b"FORM" + struct.pack(">I", len(body)) + body
+
+
+def _aiff_embed_music(src_bytes: bytes, src_ext: str) -> bytes:
+    """Cross-category AIFF: music samples (big-endian PCM) carry payload
+    in bottom 4 bits per channel. Same encoder as _wav_embed_music but
+    big-endian samples wrapped in IFF chunks."""
+    from . import _music as _m
+    env = _build_envelope(src_bytes, src_ext)
+    pcm, n_frames = _m.encode_music_payload_be(env)
+    sample_rate = _m.SAMPLE_RATE
+    num_channels = _m.CHANNELS
+    bits_per_sample = _m.BITS_PER_SAMPLE
+    comm_data = (struct.pack(">hI h", num_channels, n_frames, bits_per_sample)
+                 + _aiff_extended_float(sample_rate))
+    if _aiff_pad(len(comm_data)):
+        comm_data += b"\x00"
+    ssnd_data = struct.pack(">II", 0, 0) + pcm
+    if _aiff_pad(len(ssnd_data)):
+        ssnd_data += b"\x00"
+    body = (b"AIFF"
+            + b"COMM" + struct.pack(">I", len(comm_data)) + comm_data
+            + b"SSND" + struct.pack(">I", len(ssnd_data)) + ssnd_data)
+    return b"FORM" + struct.pack(">I", len(body)) + body
+
+
+def _aiff_extract(host: bytes) -> Tuple[bytes, str]:
+    """Dual-attempt AIFF extract: classic UCMSv1-in-SSND first, then music."""
+    if host[:4] != b"FORM" or host[8:12] != b"AIFF":
+        raise ValueError("Not an AIFF file.")
+    p = 12
+    sample_rate = num_channels = bits_per_sample = None
+    ssnd_blob = None
+    while p + 8 <= len(host):
+        ck_id = host[p:p + 4]
+        ck_size = struct.unpack(">I", host[p + 4:p + 8])[0]
+        if ck_id == b"COMM" and ck_size >= 18:
+            comm = host[p + 8:p + 8 + ck_size]
+            num_channels, _nframes, bits_per_sample = struct.unpack(
+                ">hI h", comm[:8])
+            sample_rate = _aiff_parse_extended_float(comm[8:18])
+        elif ck_id == b"SSND":
+            ssnd = host[p + 8:p + 8 + ck_size]
+            # Strip 8-byte offset + blockSize prefix
+            ssnd_blob = ssnd[8:] if len(ssnd) >= 8 else b""
+        p += 8 + ck_size + _aiff_pad(ck_size)
+    if ssnd_blob is None:
+        raise ValueError("AIFF: no SSND chunk.")
+    # Attempt 1: classic UCMSv1 envelope verbatim in SSND.
+    try:
+        return _parse_envelope(ssnd_blob)
+    except ValueError:
+        pass
+    # Attempt 2: music mode — big-endian PCM at 44.1 kHz / 16-bit / stereo.
+    if (sample_rate, num_channels, bits_per_sample) != (44100, 2, 16):
+        raise ValueError("AIFF: SSND has neither classic envelope nor "
+                         "music-mode parameters (44.1 kHz / 16-bit / stereo).")
+    from . import _music as _m
+    env = _m.decode_music_payload_be(ssnd_blob)
+    return _parse_envelope(env)
+
+
+def _aiff_extended_float(value: int) -> bytes:
+    """Encode a positive integer as IEEE 754 80-bit extended-precision
+    big-endian (used by AIFF for sample rate). Sufficient for typical
+    sample rates (8 kHz to 192 kHz). No fractional support needed."""
+    if value == 0:
+        return b"\x00" * 10
+    sign = 0
+    if value < 0:
+        sign = 0x8000
+        value = -value
+    # Find power of 2 such that value normalizes to [1, 2)
+    exp = value.bit_length() - 1
+    mantissa = value << (63 - exp)
+    biased_exp = exp + 16383
+    return struct.pack(">HQ", sign | biased_exp, mantissa)
+
+
+def _aiff_parse_extended_float(b: bytes) -> int:
+    """Inverse of _aiff_extended_float — returns positive integer rate."""
+    if len(b) != 10:
+        raise ValueError("AIFF: extended float must be 10 bytes")
+    if b == b"\x00" * 10:
+        return 0
+    biased_exp_word, mantissa = struct.unpack(">HQ", b)
+    exp = (biased_exp_word & 0x7FFF) - 16383
+    if exp < 0 or exp > 63:
+        return 0
+    return mantissa >> (63 - exp)
+
+
+# ---------------------------------------------------------------------------
+# Host: FLAC (lossless audio compression via FFmpeg)
+# ---------------------------------------------------------------------------
+# We don't ship a FLAC encoder/decoder. Instead the music WAV is generated
+# in memory, written to a temp file, then re-encoded to FLAC via FFmpeg
+# (`ffmpeg -i tmp.wav -c:a flac out.flac`). FLAC is bit-exact lossless,
+# so the bottom-4-bit payload survives the encode/decode round-trip.
+#
+# Read direction: FFmpeg decodes the FLAC to a temp WAV, then we extract
+# from that WAV using the same music decoder. has_envelope cost is one
+# FFmpeg invocation — only fires when masquerade=True is set, so the cost
+# is amortized against the conversion itself.
+
+def _flac_via_ffmpeg(wav_path: Path, flac_path: Path) -> None:
+    """Re-encode WAV → FLAC losslessly via FFmpeg."""
+    ff = _ffmpeg_path()
+    rc = subprocess.call(
+        [str(ff), "-y", "-loglevel", "error",
+         "-i", str(wav_path), "-c:a", "flac",
+         "-compression_level", "5",
+         str(flac_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if rc != 0 or not flac_path.exists():
+        raise RuntimeError(f"FFmpeg WAV->FLAC failed (exit {rc})")
+
+
+def _flac_to_wav_via_ffmpeg(flac_path: Path, wav_path: Path) -> None:
+    """Decode FLAC → WAV losslessly via FFmpeg."""
+    ff = _ffmpeg_path()
+    rc = subprocess.call(
+        [str(ff), "-y", "-loglevel", "error",
+         "-i", str(flac_path), "-c:a", "pcm_s16le",
+         "-ar", "44100", "-ac", "2",
+         str(wav_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    if rc != 0 or not wav_path.exists():
+        raise RuntimeError(f"FFmpeg FLAC->WAV failed (exit {rc})")
+
+
+def _flac_embed_music(src_bytes: bytes, src_ext: str, dst: Path) -> None:
+    """Cross-category FLAC: write music WAV to temp, re-encode via FFmpeg."""
+    import tempfile
+    wav_bytes = _wav_embed_music(src_bytes, src_ext)
+    tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
+    try:
+        tmp_wav.write_bytes(wav_bytes)
+        _flac_via_ffmpeg(tmp_wav, dst)
+    finally:
+        try: tmp_wav.unlink()
+        except OSError: pass
+
+
+def _flac_embed(src_bytes: bytes, src_ext: str, dst: Path) -> None:
+    """Same-category FLAC: classic UCMSv1 envelope in a tiny PCM WAV,
+    re-encoded to FLAC via FFmpeg."""
+    import tempfile
+    wav_bytes = _wav_embed(src_bytes, src_ext)
+    tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
+    try:
+        tmp_wav.write_bytes(wav_bytes)
+        _flac_via_ffmpeg(tmp_wav, dst)
+    finally:
+        try: tmp_wav.unlink()
+        except OSError: pass
+
+
+def _flac_extract(src: Path) -> Tuple[bytes, str]:
+    """Decode the FLAC to WAV via FFmpeg, then dual-attempt _wav_extract.
+    Note: takes a Path (not bytes) because FFmpeg needs a file. The
+    matching _EXTRACT entry adapts via _flac_extract_from_bytes below."""
+    import tempfile
+    tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
+    try:
+        _flac_to_wav_via_ffmpeg(src, tmp_wav)
+        return _wav_extract(tmp_wav.read_bytes())
+    finally:
+        try: tmp_wav.unlink()
+        except OSError: pass
+
+
+def _flac_extract_from_bytes(host: bytes) -> Tuple[bytes, str]:
+    """Bytes-API wrapper for _EXTRACT dispatch."""
+    import tempfile
+    tmp_flac = Path(tempfile.mkstemp(suffix=".flac")[1])
+    try:
+        tmp_flac.write_bytes(host)
+        return _flac_extract(tmp_flac)
+    finally:
+        try: tmp_flac.unlink()
+        except OSError: pass
+
+
 def _wav_extract(host: bytes) -> Tuple[bytes, str]:
     # Skip RIFF header + walk chunks looking for 'data'
     if host[:4] != b"RIFF" or host[8:12] != b"WAVE":
         raise ValueError("Not a WAV file.")
     p = 12
+    data_blob = None
+    sample_rate = None
+    num_channels = None
+    bits_per_sample = None
     while p + 8 <= len(host):
         ck_id = host[p:p + 4]
         ck_size = struct.unpack("<I", host[p + 4:p + 8])[0]
-        if ck_id == b"data":
-            blob = host[p + 8:p + 8 + ck_size]
-            return _parse_envelope(blob)
+        if ck_id == b"fmt ":
+            fmt = host[p + 8:p + 8 + ck_size]
+            if len(fmt) >= 16:
+                _, num_channels, sample_rate, _, _, bits_per_sample = struct.unpack(
+                    "<HHIIHH", fmt[:16])
+        elif ck_id == b"data":
+            data_blob = host[p + 8:p + 8 + ck_size]
         p += 8 + ck_size + (ck_size & 1)  # chunks pad to even
+    if data_blob is None:
+        raise ValueError("WAV: no data chunk found.")
+    # Dual-attempt: classic UCMSv1-in-data-chunk first.
+    try:
+        return _parse_envelope(data_blob)
+    except ValueError:
+        pass
+    # Music mode: 44.1 kHz / 16-bit / stereo with payload in bottom 4 bits.
+    if (sample_rate, num_channels, bits_per_sample) != (44100, 2, 16):
+        raise ValueError("WAV: data chunk has neither classic envelope nor "
+                         "music-mode parameters (44.1 kHz / 16-bit / stereo).")
+    from . import _music as _m
+    env = _m.decode_music_payload_le(data_blob)
+    return _parse_envelope(env)
     raise ValueError("WAV has no data chunk.")
 
 
@@ -310,19 +709,19 @@ def _bmp_extract(host: bytes) -> Tuple[bytes, str]:
 def _txt_embed(src_bytes: bytes, src_ext: str) -> bytes:
     env = _build_envelope(src_bytes, src_ext)
     body = base64.b64encode(env).decode("ascii")
-    # Wrap to 76 cols + a tiny header so a casual viewer sees what it is
+    # Wrap to 76 cols. No header — the file looks like an unremarkable
+    # base64 dump (PEM, key material, etc.). Detection on the read side
+    # decodes the body and checks for the envelope MAGIC; if the bytes
+    # don't decode cleanly or don't begin with MAGIC, the file falls
+    # through to the regular .txt handler.
     chunks = [body[i:i + 76] for i in range(0, len(body), 76)]
-    header = (
-        f"# Transmute Philosopher's Stone envelope ({src_ext})\n"
-        f"# This file holds the original payload base64-encoded inside a UCMSv1 envelope.\n"
-        f"# Convert it back through Transmute (Philosopher's Stone on) to recover the source.\n"
-    )
-    return (header + "\n".join(chunks) + "\n").encode("utf-8")
+    return ("\n".join(chunks) + "\n").encode("utf-8")
 
 
 def _txt_extract(host: bytes) -> Tuple[bytes, str]:
     text = host.decode("utf-8", errors="replace")
-    # Concatenate all non-comment, non-blank lines and base64-decode
+    # Stitch every non-blank line; ignore stray comment-style lines so a user
+    # who accidentally pasted an envelope under a header still recovers.
     lines = [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
     body = "".join(lines)
     try:
@@ -339,17 +738,24 @@ def _txt_extract(host: bytes) -> Tuple[bytes, str]:
 # memory but a multi-MB MKV pipe is wasteful. The convert() entrypoint
 # branches on dst_ext to pick the right API.
 
+# Module-level cache so we don't re-walk the filesystem per MKV embed/extract.
+# Auto-invalidates when the cached binary disappears mid-session.
+_FFMPEG_RESOLVED: "Path | None" = None
+
+
 def _ffmpeg_path() -> Path:
-    local = bin_dir() / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    if local.exists():
-        return local
-    found = shutil.which("ffmpeg")
-    if not found:
+    global _FFMPEG_RESOLVED
+    if _FFMPEG_RESOLVED is not None and _FFMPEG_RESOLVED.exists():
+        return _FFMPEG_RESOLVED
+    from ..utils.paths import find_ffmpeg
+    found = find_ffmpeg()
+    if found is None:
         raise RuntimeError(
             "MKV masquerade requires FFmpeg, which the launcher should have "
             "installed. Re-run launcher.py to repair the install."
         )
-    return Path(found)
+    _FFMPEG_RESOLVED = found
+    return _FFMPEG_RESOLVED
 
 
 def _mkv_pad_payload(env: bytes) -> tuple[bytes, int, int, int]:
@@ -504,9 +910,15 @@ def _padding_iter(seed: int, total_bytes: int, chunk: int = CHUNK_SIZE):
 
 
 def _v2_pixel_iter_from_path(src_path: Path, src_ext: str, width: int, height: int,
-                              cancel: Optional["CancellationToken"] = None):
+                              cancel: Optional["CancellationToken"] = None,
+                              pad_zero: bool = False):
     """Yield exactly width*height*3 bytes total: v2 header + payload bytes
-    (streamed from src_path) + pseudo-random pad. Bounded memory."""
+    (streamed from src_path) + pad. Bounded memory.
+
+    `pad_zero`: when True, the pad section is all zero bytes instead of
+    pseudo-random. Used by the Mandelbrot mode so the visible image
+    becomes the fractal pattern (zero XOR keystream = keystream itself).
+    Same-category mode keeps the pseudo-random pad."""
     payload_size = src_path.stat().st_size
     header = _v2_header_bytes(payload_size, src_ext, width, height)
     yield header
@@ -522,21 +934,29 @@ def _v2_pixel_iter_from_path(src_path: Path, src_ext: str, width: int, height: i
                 break
             yield buf
             written += len(buf)
-    # Pseudo-random pad fills remainder
+    # Pad fills remainder. Zeros for Mandelbrot mode (so the visible image
+    # is the keystream after XOR), pseudo-random otherwise.
     remaining = target_total - written
     if remaining < 0:
         raise RuntimeError(
             f"v2 envelope overflowed image ({-remaining} extra bytes). "
             "Dimension calc bug?"
         )
-    seed = _padding_seed(MAGIC_V2, src_ext, payload_size)
-    for chunk in _padding_iter(seed, remaining):
-        if cancel is not None:
-            cancel.check()
-        yield chunk
+    if pad_zero:
+        for chunk in _zero_pad_iter(remaining):
+            if cancel is not None:
+                cancel.check()
+            yield chunk
+    else:
+        seed = _padding_seed(MAGIC_V2, src_ext, payload_size)
+        for chunk in _padding_iter(seed, remaining):
+            if cancel is not None:
+                cancel.check()
+            yield chunk
 
 
-def _v2_pixel_iter_from_bytes(src_bytes: bytes, src_ext: str, width: int, height: int):
+def _v2_pixel_iter_from_bytes(src_bytes: bytes, src_ext: str, width: int, height: int,
+                               pad_zero: bool = False):
     """Same as above but for whole-file in-memory paths (small files).
     Used by the legacy bytes API for back-compat."""
     payload_size = len(src_bytes)
@@ -547,43 +967,125 @@ def _v2_pixel_iter_from_bytes(src_bytes: bytes, src_ext: str, width: int, height
     remaining = target_total - len(header) - payload_size
     if remaining < 0:
         raise RuntimeError(f"v2 envelope overflow ({-remaining} extra bytes).")
-    seed = _padding_seed(MAGIC_V2, src_ext, payload_size)
-    for chunk in _padding_iter(seed, remaining):
-        yield chunk
+    if pad_zero:
+        for chunk in _zero_pad_iter(remaining):
+            yield chunk
+    else:
+        seed = _padding_seed(MAGIC_V2, src_ext, payload_size)
+        for chunk in _padding_iter(seed, remaining):
+            yield chunk
+
+
+def _zero_pad_iter(total_bytes: int, chunk: int = CHUNK_SIZE):
+    remaining = total_bytes
+    while remaining > 0:
+        n = min(chunk, remaining)
+        yield bytes(n)
+        remaining -= n
+
+
+# ---------------------------------------------------------------------------
+# Mandelbrot keystream (cross-category Stone aesthetic, image targets only)
+# ---------------------------------------------------------------------------
+
+# Salt that scopes the keystream to Transmute. Different tools doing similar
+# fractal tricks won't accidentally collide with our seed.
+_MANDELBROT_SALT = b"transmute-mandelbrot-v1"
+
+# NumPy-vectorized full-image Mandelbrot keystream. RGB-interleaved
+# (3 bytes per pixel) so the fractal renders in color directly, without
+# tiling. Generation cost is ~0.3-0.6 sec for a 1080² image.
+
+
+def _mandelbrot_keystream(width: int, height: int) -> bytes:
+    """Generate a deterministic full-size colored Mandelbrot keystream
+    of length `width * height * 3` bytes (RGB-interleaved row-major).
+
+    Seed is derived from the image dimensions plus a fixed salt, so the
+    keystream is recoverable on the read side from the PNG/BMP container's
+    declared dimensions alone.
+    """
+    from . import _mandelbrot as _m
+    seed_bytes = _MANDELBROT_SALT + struct.pack(">II", width, height)
+    seed = _m.derive_seed(seed_bytes)
+    return _m.generate_keystream(width, height, seed)
+
+
+def _xor_pixel_iter(pixel_iter: "Iterator[bytes]", keystream: bytes):
+    """Wrap a pixel-byte iterator, XOR'ing each chunk byte-for-byte with
+    successive bytes of the keystream. The keystream length equals the
+    total bytes the iterator will yield (width*height*3 for RGB), so no
+    modulo wrapping is needed — straight 1:1 XOR."""
+    pos = 0
+    klen = len(keystream)
+    for chunk in pixel_iter:
+        n = len(chunk)
+        out = bytearray(n)
+        for i in range(n):
+            out[i] = chunk[i] ^ keystream[pos + i]
+        pos += n
+        if pos > klen:
+            raise RuntimeError("Mandelbrot keystream exhausted: "
+                                f"image bytes ({pos}) exceed keystream ({klen}).")
+        yield bytes(out)
 
 
 def _png_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            cancel: Optional["CancellationToken"] = None,
-                           progress: Optional[Callable[[float], None]] = None) -> None:
+                           progress: Optional[Callable[[float], None]] = None,
+                           mandelbrot: bool = False) -> None:
     from .streaming_image import stream_png_write
     payload_size = src_path.stat().st_size
     width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
-    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height, cancel)
+    # Mandelbrot mode: pad with zeros so the visible pad region becomes
+    # the raw keystream (zero XOR keystream = keystream). Otherwise the
+    # pseudo-random pad XOR'd with anything stays uniformly random and
+    # the fractal isn't visible.
+    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height,
+                                           cancel, pad_zero=mandelbrot)
+    if mandelbrot:
+        pixel_iter = _xor_pixel_iter(pixel_iter,
+                                      _mandelbrot_keystream(width, height))
     stream_png_write(dst, width, height, pixel_iter, cancel, progress)
 
 
 def _bmp_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            cancel: Optional["CancellationToken"] = None,
-                           progress: Optional[Callable[[float], None]] = None) -> None:
+                           progress: Optional[Callable[[float], None]] = None,
+                           mandelbrot: bool = False) -> None:
     from .streaming_image import stream_bmp_write
     payload_size = src_path.stat().st_size
     width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
-    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height, cancel)
+    pixel_iter = _v2_pixel_iter_from_path(src_path, src_ext, width, height,
+                                           cancel, pad_zero=mandelbrot)
+    if mandelbrot:
+        pixel_iter = _xor_pixel_iter(pixel_iter,
+                                      _mandelbrot_keystream(width, height))
     stream_bmp_write(dst, width, height, pixel_iter, cancel, progress)
 
 
-def _png_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path) -> None:
+def _png_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
+                              mandelbrot: bool = False) -> None:
     from .streaming_image import stream_png_write
     width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
-    stream_png_write(dst, width, height,
-                      _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height))
+    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height,
+                                            pad_zero=mandelbrot)
+    if mandelbrot:
+        pixel_iter = _xor_pixel_iter(pixel_iter,
+                                      _mandelbrot_keystream(width, height))
+    stream_png_write(dst, width, height, pixel_iter)
 
 
-def _bmp_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path) -> None:
+def _bmp_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
+                              mandelbrot: bool = False) -> None:
     from .streaming_image import stream_bmp_write
     width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
-    stream_bmp_write(dst, width, height,
-                      _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height))
+    pixel_iter = _v2_pixel_iter_from_bytes(src_bytes, src_ext, width, height,
+                                            pad_zero=mandelbrot)
+    if mandelbrot:
+        pixel_iter = _xor_pixel_iter(pixel_iter,
+                                      _mandelbrot_keystream(width, height))
+    stream_bmp_write(dst, width, height, pixel_iter)
 
 
 def _extract_v2_from_pixel_iter(pixel_iter: Iterator[bytes], dst_path: Path,
@@ -647,15 +1149,51 @@ def _extract_v2_from_pixel_iter(pixel_iter: Iterator[bytes], dst_path: Path,
 def _png_extract_v2_to_file(src: Path, dst_path: Path,
                              cancel: Optional["CancellationToken"] = None) -> str:
     from .streaming_image import stream_png_read
-    _w, _h, it = stream_png_read(src, cancel)
-    return _extract_v2_from_pixel_iter(it, dst_path, cancel)
+    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_png_read)
 
 
 def _bmp_extract_v2_to_file(src: Path, dst_path: Path,
                              cancel: Optional["CancellationToken"] = None) -> str:
     from .streaming_image import stream_bmp_read
-    _w, _h, it = stream_bmp_read(src, cancel)
-    return _extract_v2_from_pixel_iter(it, dst_path, cancel)
+    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_bmp_read)
+
+
+def _extract_v2_dual_attempt(src: Path, dst_path: Path,
+                              cancel: Optional["CancellationToken"],
+                              stream_reader) -> str:
+    """Try plain v2 extraction first (same-category Stone). If the magic
+    isn't where it should be, retry with the Mandelbrot inverse XOR applied
+    to the pixel byte stream (cross-category Stone aesthetic).
+
+    Buffers the entire pixel byte stream into memory once. For 4096^2 RGB
+    that's 48 MB temporarily — acceptable for the size range Stone uses.
+    """
+    width, height, it = stream_reader(src, cancel)
+    pixel_bytes = bytearray()
+    for chunk in it:
+        if cancel is not None:
+            cancel.check()
+        pixel_bytes.extend(chunk)
+
+    # Attempt 1: plain (no Mandelbrot)
+    if len(pixel_bytes) >= 8 and bytes(pixel_bytes[:8]) == MAGIC_V2:
+        return _extract_v2_from_pixel_iter(iter([bytes(pixel_bytes)]), dst_path, cancel)
+
+    # Attempt 2: Mandelbrot inverse — XOR the buffer with the deterministic
+    # full-image RGB keystream, then re-check for magic.
+    keystream = _mandelbrot_keystream(width, height)
+    n = min(len(pixel_bytes), len(keystream))
+    xord = bytearray(len(pixel_bytes))
+    for i in range(n):
+        xord[i] = pixel_bytes[i] ^ keystream[i]
+    # Any tail bytes past the keystream length stay as-is (shouldn't happen
+    # in normal use; defensive).
+    for i in range(n, len(pixel_bytes)):
+        xord[i] = pixel_bytes[i]
+    if len(xord) >= 8 and bytes(xord[:8]) == MAGIC_V2:
+        return _extract_v2_from_pixel_iter(iter([bytes(xord)]), dst_path, cancel)
+
+    raise ValueError("v2 envelope: magic not found in plain or Mandelbrot-decoded pixel data.")
 
 
 # ---------------------------------------------------------------------------
@@ -781,16 +1319,193 @@ def _py_is_stone(src: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Host: PLY (ASCII Polygon File Format) — envelope rides in `comment` lines
+# ---------------------------------------------------------------------------
+# PLY's header allows free-form `comment ...` lines that any conformant reader
+# ignores. We base64 the envelope, split into 76-char chunks, and write one
+# chunk per `comment` line. The geometry block is a single vertex at origin
+# so the file loads in MeshLab / Blender / Open3D without complaint.
+
+_PLY_HEADER = "ply\nformat ascii 1.0\n"
+_PLY_FOOTER = ("element vertex 1\nproperty float x\nproperty float y\n"
+               "property float z\nend_header\n0 0 0\n")
+_PLY_COMMENT_TAG = "uc"   # short prefix on each comment line so extraction can
+                          # ignore unrelated comments a user might paste in.
+
+
+def _ply_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    env = _build_envelope(src_bytes, src_ext)
+    body = base64.b64encode(env).decode("ascii")
+    chunks = [body[i:i + 72] for i in range(0, len(body), 72)]
+    lines = [f"comment {_PLY_COMMENT_TAG} {c}\n" for c in chunks]
+    return (_PLY_HEADER + "".join(lines) + _PLY_FOOTER).encode("utf-8")
+
+
+def _ply_extract(host: bytes) -> Tuple[bytes, str]:
+    text = host.decode("utf-8", errors="replace")
+    pieces: list[str] = []
+    in_header = False
+    for line in text.splitlines():
+        s = line.strip()
+        if s == "ply":
+            in_header = True
+            continue
+        if not in_header:
+            continue
+        if s == "end_header":
+            break
+        if s.startswith("comment "):
+            rest = s[len("comment "):].strip()
+            if rest.startswith(_PLY_COMMENT_TAG + " "):
+                pieces.append(rest[len(_PLY_COMMENT_TAG) + 1:])
+    if not pieces:
+        raise ValueError("PLY host: no Stone envelope comments found.")
+    body = "".join(pieces)
+    try:
+        env = base64.b64decode(body, validate=True)
+    except Exception as e:
+        raise ValueError(f"PLY host: malformed base64 envelope: {e}")
+    return _parse_envelope(env)
+
+
+# ---------------------------------------------------------------------------
+# Host: OBJ (Wavefront) — envelope rides in `#` comment lines
+# ---------------------------------------------------------------------------
+# OBJ readers ignore any line beginning with `#`. Same scheme as PLY: tagged
+# comments carrying base64 chunks, then a single vertex so the file is
+# structurally valid as a (degenerate) mesh.
+
+_OBJ_COMMENT_TAG = "uc"
+
+
+def _obj_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    env = _build_envelope(src_bytes, src_ext)
+    body = base64.b64encode(env).decode("ascii")
+    chunks = [body[i:i + 72] for i in range(0, len(body), 72)]
+    lines = [f"# {_OBJ_COMMENT_TAG} {c}\n" for c in chunks]
+    return ("".join(lines) + "v 0 0 0\n").encode("utf-8")
+
+
+def _obj_extract(host: bytes) -> Tuple[bytes, str]:
+    text = host.decode("utf-8", errors="replace")
+    pieces: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            rest = s[1:].strip()
+            if rest.startswith(_OBJ_COMMENT_TAG + " "):
+                pieces.append(rest[len(_OBJ_COMMENT_TAG) + 1:])
+    if not pieces:
+        raise ValueError("OBJ host: no Stone envelope comments found.")
+    body = "".join(pieces)
+    try:
+        env = base64.b64decode(body, validate=True)
+    except Exception as e:
+        raise ValueError(f"OBJ host: malformed base64 envelope: {e}")
+    return _parse_envelope(env)
+
+
+# ---------------------------------------------------------------------------
+# Host: GLB (binary glTF) — envelope in a custom chunk after JSON+BIN
+# ---------------------------------------------------------------------------
+# GLB layout: 12-byte header (magic "glTF", version, total length) followed
+# by a sequence of chunks. Each chunk: 4-byte length, 4-byte type, payload.
+# Standard chunk types are JSON (0x4E4F534A) and BIN (0x004E4942). The spec
+# says readers MUST ignore unknown chunk types, so we append a chunk with
+# type b"ucMs" carrying the envelope. The JSON/BIN chunks describe a single
+# degenerate vertex so any glTF viewer loads the file cleanly.
+#
+# Chunks must be 4-byte aligned. JSON chunks pad with 0x20 (space), BIN
+# chunks pad with 0x00. The custom envelope chunk pads with 0x00.
+
+_GLB_MAGIC = b"glTF"
+_GLB_VERSION = 2
+_GLB_CHUNK_JSON = b"JSON"
+_GLB_CHUNK_BIN = b"BIN\x00"
+_GLB_CHUNK_UCMS = b"ucMs"
+
+# Minimal valid glTF 2.0 JSON: one node, one mesh, one degenerate triangle
+# referencing a 36-byte BIN buffer (3 vertices × 3 floats × 4 bytes). The
+# triangle is degenerate (all three vertices at origin) so it has zero area
+# and renders nothing — but the file is well-formed.
+_GLB_MIN_JSON = (
+    b'{"asset":{"version":"2.0"},"scenes":[{"nodes":[0]}],'
+    b'"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],'
+    b'"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",'
+    b'"min":[0,0,0],"max":[0,0,0]}],'
+    b'"bufferViews":[{"buffer":0,"byteLength":36,"byteOffset":0}],'
+    b'"buffers":[{"byteLength":36}]}'
+)
+_GLB_MIN_BIN = b"\x00" * 36
+
+
+def _pad4(n: int) -> int:
+    """Bytes needed to round n up to a multiple of 4."""
+    return (-n) & 3
+
+
+def _glb_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    env = _build_envelope(src_bytes, src_ext)
+
+    json_pad = b" " * _pad4(len(_GLB_MIN_JSON))
+    json_chunk_data = _GLB_MIN_JSON + json_pad
+    bin_pad = b"\x00" * _pad4(len(_GLB_MIN_BIN))
+    bin_chunk_data = _GLB_MIN_BIN + bin_pad
+    env_pad = b"\x00" * _pad4(len(env))
+    env_chunk_data = env + env_pad
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack("<I", len(data)) + tag + data
+
+    body = (chunk(_GLB_CHUNK_JSON, json_chunk_data)
+            + chunk(_GLB_CHUNK_BIN, bin_chunk_data)
+            + chunk(_GLB_CHUNK_UCMS, env_chunk_data))
+    total_len = 12 + len(body)
+    header = _GLB_MAGIC + struct.pack("<II", _GLB_VERSION, total_len)
+    return header + body
+
+
+def _glb_extract(host: bytes) -> Tuple[bytes, str]:
+    if len(host) < 12 or host[:4] != _GLB_MAGIC:
+        raise ValueError("GLB host: missing glTF magic.")
+    version, total_len = struct.unpack("<II", host[4:12])
+    if version != _GLB_VERSION:
+        raise ValueError(f"GLB host: unsupported glTF version {version}.")
+    p = 12
+    while p + 8 <= len(host):
+        chunk_len, = struct.unpack("<I", host[p:p + 4])
+        tag = host[p + 4:p + 8]
+        data = host[p + 8:p + 8 + chunk_len]
+        p += 8 + chunk_len
+        if tag == _GLB_CHUNK_UCMS:
+            # Strip trailing zero padding before parsing
+            return _parse_envelope(data.rstrip(b"\x00"))
+    raise ValueError("GLB host: no Stone envelope chunk (ucMs) found.")
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-_EMBED = {".wav": _wav_embed, ".png": _png_embed, ".bmp": _bmp_embed, ".txt": _txt_embed}
-_EXTRACT = {".wav": _wav_extract, ".png": _png_extract, ".bmp": _bmp_extract, ".txt": _txt_extract}
+_EMBED = {
+    ".wav": _wav_embed, ".png": _png_embed, ".bmp": _bmp_embed,
+    ".txt": _txt_embed,
+    ".ply": _ply_embed, ".obj": _obj_embed, ".glb": _glb_embed,
+    ".aiff": _aiff_embed,
+    # .flac is dispatched specially below (needs Path target for FFmpeg).
+}
+_EXTRACT = {
+    ".wav": _wav_extract, ".png": _png_extract, ".bmp": _bmp_extract,
+    ".txt": _txt_extract,
+    ".ply": _ply_extract, ".obj": _obj_extract, ".glb": _glb_extract,
+    ".aiff": _aiff_extract,
+    ".flac": _flac_extract_from_bytes,
+}
 
 
 def can_embed_into(ext: str) -> bool:
     ext = ext.lower()
-    return ext in _EMBED or ext in (".mkv", ".py")
+    return ext in _EMBED or ext in (".mkv", ".py", ".flac")
 
 
 def can_extract_from(ext: str) -> bool:
@@ -855,17 +1570,41 @@ def _try_extract(src: Path, src_ext: str) -> Tuple[bytes, str] | None:
 
 
 def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
-               cancel: Optional["CancellationToken"] = None) -> None:
-    """Whole-bytes-in-memory embed. Used for small files."""
+               cancel: Optional["CancellationToken"] = None,
+               cross_category: bool = False) -> None:
+    """Whole-bytes-in-memory embed. Used for small files.
+
+    `cross_category` triggers the aesthetic encoder: Mandelbrot XOR for
+    PNG/BMP image targets. Audio targets (WAV/AIFF/FLAC) get the music
+    encoder via separate dispatch (see _embed_audio_music below).
+    """
     dst_ext = dst_ext.lower()
     if dst_ext == ".mkv":
         _mkv_embed_to_file(payload, src_ext, dst)
         return
     if dst_ext == ".png":
-        _png_embed_v2_from_bytes(payload, src_ext, dst)
+        _png_embed_v2_from_bytes(payload, src_ext, dst, mandelbrot=cross_category)
         return
     if dst_ext == ".bmp":
-        _bmp_embed_v2_from_bytes(payload, src_ext, dst)
+        _bmp_embed_v2_from_bytes(payload, src_ext, dst, mandelbrot=cross_category)
+        return
+    if dst_ext == ".wav" and cross_category:
+        # Cross-category audio target: render music samples with payload
+        # in low 4 bits per channel. Same-category WAV (audio source)
+        # falls through to the classic _wav_embed via _EMBED dispatch.
+        dst.write_bytes(_wav_embed_music(payload, src_ext))
+        return
+    if dst_ext == ".aiff" and cross_category:
+        dst.write_bytes(_aiff_embed_music(payload, src_ext))
+        return
+    if dst_ext == ".flac":
+        # FLAC always goes through FFmpeg. Cross-category uses the music
+        # encoder; same-category uses the classic 8 kHz mono envelope WAV
+        # (re-encoded to FLAC for storage). Both round-trip losslessly.
+        if cross_category:
+            _flac_embed_music(payload, src_ext, dst)
+        else:
+            _flac_embed(payload, src_ext, dst)
         return
     if dst_ext == ".py":
         # Write payload to a temp file so _py_embed_to_file can stream it
@@ -889,25 +1628,29 @@ def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
 
 def _embed_streamed_to(dst: Path, src_path: Path, src_ext: str, dst_ext: str,
                         cancel: Optional["CancellationToken"] = None,
-                        progress: Optional[Callable[[float], None]] = None) -> None:
+                        progress: Optional[Callable[[float], None]] = None,
+                        cross_category: bool = False) -> None:
     """Path-based streaming embed. Used for files above the streaming threshold."""
     dst_ext = dst_ext.lower()
     if dst_ext == ".png":
-        _png_embed_v2_to_file(src_path, src_ext, dst, cancel, progress)
+        _png_embed_v2_to_file(src_path, src_ext, dst, cancel, progress,
+                              mandelbrot=cross_category)
         return
     if dst_ext == ".bmp":
-        _bmp_embed_v2_to_file(src_path, src_ext, dst, cancel, progress)
+        _bmp_embed_v2_to_file(src_path, src_ext, dst, cancel, progress,
+                              mandelbrot=cross_category)
         return
     if dst_ext == ".py":
         _py_embed_to_file(src_path, src_ext, dst, cancel)
         return
     # WAV / TXT / MKV: whole-file bytes API still used; fall through.
     src_bytes = src_path.read_bytes()
-    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel)
+    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel, cross_category=cross_category)
 
 
 def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
-            cancel: CancellationToken, progress: Callable[[float], None]) -> None:
+            cancel: CancellationToken, progress: Callable[[float], None],
+            *, cross_category: bool = False) -> None:
     """Top-level entry the conversion queue calls when Masquerade Mode is on.
 
     Two cases:
@@ -919,6 +1662,12 @@ def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
 
     For files at/above streaming_threshold, uses path-based streaming
     helpers — never materializes the whole payload in memory.
+
+    `cross_category` indicates the source and target are in different media
+    categories (image vs audio vs doc vs model). When True AND the dst is
+    an image (PNG/BMP) or audio (WAV/AIFF/FLAC) host, the embed applies
+    the corresponding aesthetic encoder (Mandelbrot keystream / music
+    bit-pack). Same-category Stone keeps byte-passthrough behavior.
     """
     progress(0.05)
     src_ext = src_ext.lower()
@@ -935,22 +1684,28 @@ def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
             dst.write_bytes(payload)
             progress(1.0)
             return
-        _embed_to(dst, payload, recovered_ext, dst_ext, cancel)
+        _embed_to(dst, payload, recovered_ext, dst_ext, cancel,
+                  cross_category=cross_category)
         progress(1.0)
         return
 
-    # Decide streamed vs whole-file path based on source size
+    # Decide streamed vs whole-file path based on source size.
+    # .py is always routed through the path-based variant (regardless of
+    # size) so the embedded reconstruction script preserves the original
+    # filename instead of a "payload.<ext>" placeholder.
     src_size = src.stat().st_size
     threshold = streaming_threshold(dst_ext)
-    if src_size >= threshold and dst_ext in (".png", ".bmp", ".py"):
+    if dst_ext == ".py" or (src_size >= threshold and dst_ext in (".png", ".bmp")):
         cancel.check()
         progress(0.1)
-        _embed_streamed_to(dst, src, src_ext, dst_ext, cancel, progress)
+        _embed_streamed_to(dst, src, src_ext, dst_ext, cancel, progress,
+                           cross_category=cross_category)
         progress(1.0)
         return
 
     src_bytes = src.read_bytes()
     cancel.check()
     progress(0.3)
-    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel)
+    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel,
+              cross_category=cross_category)
     progress(1.0)

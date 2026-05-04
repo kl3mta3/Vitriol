@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Muted folder icon for the drop-zone Browse button. Tones picked to
+     sit quietly inside the dark alchemical theme — aged-pewter body, no
+     bright yellow. Two-tone shading (back tab darker, front face lighter)
+     for a subtle dimensional feel without standing out. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
+  <!-- Back tab (the part that sticks up) -->
+  <path d="M3 6.5
+           C3 5.7 3.7 5 4.5 5
+           L9.5 5
+           L11.2 7
+           L19.5 7
+           C20.3 7 21 7.7 21 8.5
+           L21 9
+           L3 9
+           Z"
+        fill="#5a5a6e"
+        stroke="#2a2a38"
+        stroke-width="0.6"
+        stroke-linejoin="round"/>
+  <!-- Folder front face -->
+  <path d="M3 9
+           L21 9
+           L21 18.5
+           C21 19.3 20.3 20 19.5 20
+           L4.5 20
+           C3.7 20 3 19.3 3 18.5
+           Z"
+        fill="#787890"
+        stroke="#2a2a38"
+        stroke-width="0.6"
+        stroke-linejoin="round"/>
+  <!-- Subtle highlight along the top edge of the front face -->
+  <line x1="3.4" y1="9.4" x2="20.6" y2="9.4"
+        stroke="#9d9db0" stroke-width="0.5" opacity="0.55"/>
+</svg>

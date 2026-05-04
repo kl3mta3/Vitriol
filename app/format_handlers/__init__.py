@@ -115,7 +115,11 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
         except ImportError:
             extras = set()
 
-    # Media: stay in the same category (image-to-image, audio-to-audio, video-to-video, model-to-model).
+    # Media: stay in the same category (image-to-image, audio-to-audio,
+    # video-to-video, model-to-model). Cross-category targets (image→pdf,
+    # pdf→png, etc.) are gated on Stone — they only appear in the dropdown
+    # when the user has Philosopher's Stone enabled. Without Stone, the
+    # dropdown is type-pure.
     if src_ext in MEDIA_HANDLERS:
         cat = MEDIA_CATEGORY_OF[src_ext]
         targets = {e for e, c in MEDIA_CATEGORY_OF.items() if c == cat and e != src_ext}
@@ -123,16 +127,12 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
         if cat == "video":
             targets |= {e for e, c in MEDIA_CATEGORY_OF.items() if c == "audio"}
         targets &= MEDIA_WRITE_OK
-        # NEW: image sources can also convert to document targets — the
-        # image_bytes_to_textdoc adapter wraps them in a single-block TextDoc
-        # which document writers (pdf_write, markdown, txt, html, docx, epub)
-        # render as embedded images or bundle layouts.
-        if cat == "image":
+        # Stone unlocks cross-category writers for image sources (image→pdf
+        # via XObject embed, image→md/txt/html via bundle layout, etc.).
+        if masquerade and cat == "image":
             for ext, mod in WRITERS.items():
                 if ext == src_ext:
                     continue
-                # Any text/tabular DOC_KIND writer can accept the image-to-textdoc
-                # adapter's output.
                 if getattr(mod, "DOC_KIND", "text") in ("text", "tabular"):
                     targets.add(ext)
         return sorted(targets | extras)
@@ -150,6 +150,20 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
         dst_kind = getattr(mod, "DOC_KIND", "text")
         if dst_kind == src_kind or (src_kind, dst_kind) in _ADAPTER_PAIRS:
             targets.add(ext)
+    # Stone unlocks doc → media targets (PDF→PNG/WAV/MKV via Stone envelope
+    # auto-engaged in the router). Without Stone, doc sources only see other
+    # doc/tabular targets.
+    if masquerade:
+        try:
+            from . import masquerade as _msq
+            if not _msq.is_lossy(src_ext):
+                for host in _msq.TARGETS:
+                    if host == src_ext:
+                        continue
+                    if host in MEDIA_CATEGORY_OF:
+                        targets.add(host)
+        except ImportError:
+            pass
     return sorted(targets | extras)
 
 

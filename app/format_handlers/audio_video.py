@@ -144,22 +144,32 @@ def _maybe_swap_to_hw(codec_args: list[str]) -> list[str]:
     return out
 
 
+# Module-level resolved paths. Populated lazily by _ffmpeg_path / _ffprobe_path
+# on first call so we don't re-walk filesystem + PATH per conversion. Cleared
+# automatically when the cached binary disappears between conversions.
+_FFMPEG_RESOLVED: Optional[Path] = None
+_FFPROBE_RESOLVED: Optional[Path] = None
+
+
 def _ffmpeg_path() -> Path:
-    local = bin_dir() / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    if local.exists():
-        return local
-    found = shutil.which("ffmpeg")
-    if not found:
+    global _FFMPEG_RESOLVED
+    if _FFMPEG_RESOLVED is not None and _FFMPEG_RESOLVED.exists():
+        return _FFMPEG_RESOLVED
+    from ..utils.paths import find_ffmpeg
+    found = find_ffmpeg()
+    if found is None:
         raise RuntimeError("FFmpeg not found. Install it via the launch prompt or place ffmpeg.exe in ./bin/.")
-    return Path(found)
+    _FFMPEG_RESOLVED = found
+    return _FFMPEG_RESOLVED
 
 
 def _ffprobe_path() -> Optional[Path]:
-    local = bin_dir() / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
-    if local.exists():
-        return local
-    found = shutil.which("ffprobe")
-    return Path(found) if found else None
+    global _FFPROBE_RESOLVED
+    if _FFPROBE_RESOLVED is not None and _FFPROBE_RESOLVED.exists():
+        return _FFPROBE_RESOLVED
+    from ..utils.paths import find_ffprobe
+    _FFPROBE_RESOLVED = find_ffprobe()
+    return _FFPROBE_RESOLVED
 
 
 def _probe_duration_seconds(src: Path) -> Optional[float]:

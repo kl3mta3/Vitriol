@@ -31,31 +31,16 @@ _ASSIMP_WIN_URL = "https://github.com/assimp/assimp/releases/download/v5.4.3/ass
 _ASSIMP_WIN_SHA = ""
 
 
+# Both delegate to the canonical helpers in app.utils.paths so launcher,
+# dependency_check, and the runtime modules use identical lookup logic.
 def find_ffmpeg() -> Optional[Path]:
-    local = bin_dir() / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-    if local.exists():
-        return local
-    found = shutil.which("ffmpeg")
-    return Path(found) if found else None
+    from ..utils.paths import find_ffmpeg as _find
+    return _find()
 
 
 def find_assimp() -> Optional[Path]:
-    candidates = [
-        bin_dir() / "assimp-vc143-mt.dll",
-        bin_dir() / "assimp.dll",
-        bin_dir() / "libassimp.dll",
-        bin_dir() / "libassimp.so",
-        bin_dir() / "libassimp.dylib",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
-    if os.name == "nt":
-        for env in ("ASSIMP_DLL", "ASSIMP_PATH"):
-            p = os.environ.get(env)
-            if p and Path(p).exists():
-                return Path(p)
-    return None
+    from ..utils.paths import find_assimp as _find
+    return _find()
 
 
 def run_checks(parent=None) -> None:

@@ -46,6 +46,7 @@ class Job:
     save_over_original: bool
     masquerade: bool = False
     verify_round_trip: bool = False
+    compiler: bool = False  # .py target: produce a self-extracting Stone script
     total_bytes: int = 0   # populated at submit() from src.stat().st_size
     cancel: CancellationToken = field(default_factory=CancellationToken)
 
@@ -100,7 +101,8 @@ class _Runnable(QRunnable):
                 self._run_with_verify(job, sig, dst, warnings, on_progress, emit_elapsed)
             else:
                 convert_file(job.src, dst, job.src_ext, job.dst_ext, job.cancel,
-                             on_progress, warnings, masquerade=job.masquerade)
+                             on_progress, warnings,
+                             masquerade=job.masquerade, compiler=job.compiler)
                 for w in warnings:
                     sig.warning.emit(job.id, w)
                 if job.save_over_original and dst != job.src:
@@ -139,7 +141,8 @@ class _Runnable(QRunnable):
             tmp_reverse = tmp_dir / ("reverse" + job.src_ext)
 
             convert_file(job.src, tmp_forward, job.src_ext, job.dst_ext,
-                         job.cancel, on_progress, warnings, masquerade=job.masquerade)
+                         job.cancel, on_progress, warnings,
+                         masquerade=job.masquerade, compiler=job.compiler)
             for w in warnings:
                 sig.warning.emit(job.id, w)
             sig.progress.emit(job.id, 0.55)
@@ -159,7 +162,8 @@ class _Runnable(QRunnable):
 
             rev_warnings: list[str] = []
             convert_file(tmp_forward, tmp_reverse, job.dst_ext, job.src_ext,
-                         job.cancel, rev_progress, rev_warnings, masquerade=job.masquerade)
+                         job.cancel, rev_progress, rev_warnings,
+                         masquerade=job.masquerade, compiler=job.compiler)
             sig.progress.emit(job.id, 0.95)
 
             try:
@@ -263,6 +267,7 @@ class ConversionQueue(QObject):
         save_over_original: bool = False,
         masquerade: bool = False,
         verify_round_trip: bool = False,
+        compiler: bool = False,
     ) -> int:
         job_id = self._next_id
         self._next_id += 1
@@ -278,6 +283,7 @@ class ConversionQueue(QObject):
             save_over_original=save_over_original,
             masquerade=masquerade,
             verify_round_trip=verify_round_trip,
+            compiler=compiler,
             total_bytes=total_bytes,
             cancel=token,
         )

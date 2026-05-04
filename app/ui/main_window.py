@@ -188,8 +188,9 @@ class MainWindow(QMainWindow):
             '<p style="width:280px; margin:0;">'
             "Enables cross-format byte-preserving conversions (text→audio, image→text, etc.). "
             "Files keep their original bytes intact while wearing another format's container. "
-            "Round-trip safe with lossless source formats only — lossy formats "
-            "(jpg, mp3, mp4, etc.) are excluded."
+            "Cross-category outputs get aesthetic treatment — fractal patterns for images, "
+            "generated music for audio. Round-trip integrity preserved. "
+            "Lossless source formats only — lossy formats (jpg, mp3, mp4, etc.) are excluded."
             "</p>"
         )
         verify_tip = (
@@ -354,6 +355,7 @@ class MainWindow(QMainWindow):
             save_over_original=widget.save_over_original(),
             masquerade=masq,
             verify_round_trip=verify,
+            compiler=widget.compiler_enabled(),
         )
         self._job_to_widget[job_id] = widget
 

@@ -14,6 +14,35 @@ class UnsupportedConversionError(Exception):
     pass
 
 
+def _is_cross_category(src_ext: str, dst_ext: str) -> bool:
+    """True iff src and dst belong to different media categories.
+    Non-media extensions (text/tabular/binary) all count as 'doc'.
+    Used to drive the aesthetic encoders in masquerade.convert
+    (Mandelbrot for image targets, music for audio targets)."""
+    src_cat = fh.MEDIA_CATEGORY_OF.get(src_ext, "doc")
+    dst_cat = fh.MEDIA_CATEGORY_OF.get(dst_ext, "doc")
+    return src_cat != dst_cat
+
+
+def _try_trailer_envelope(src: Path, src_ext: str):
+    """Dispatch to the per-handler trailer-envelope probe. Returns
+    (payload, src_ext) on success or None. Used by the doc -> media
+    short-circuit to make PNG -> PDF -> PNG round-trip without Stone."""
+    if src_ext == ".pdf":
+        from ..format_handlers.pdf_read import _try_read_trailer_envelope
+        return _try_read_trailer_envelope(src)
+    if src_ext in (".docx", ".epub"):
+        try:
+            import zipfile
+            with zipfile.ZipFile(src) as z:
+                if "_transmute/original.bin" in z.namelist():
+                    from ..format_handlers.masquerade import _parse_envelope
+                    return _parse_envelope(z.read("_transmute/original.bin"))
+        except (zipfile.BadZipFile, KeyError, ValueError, OSError):
+            return None
+    return None
+
+
 def convert_file(
     src: Path,
     dst: Path,
@@ -23,6 +52,7 @@ def convert_file(
     progress: Optional[Callable[[float], None]] = None,
     warnings: Optional[list] = None,
     masquerade: bool = False,
+    compiler: bool = False,
 ) -> None:
     """Run a single conversion. Raises UnsupportedConversionError on bad pairs.
 
@@ -32,6 +62,10 @@ def convert_file(
 
     When `masquerade` is True, routes byte-passthrough conversions through
     the masquerade engine instead of the regular handlers.
+
+    When `compiler` is True AND the destination is `.py`, the source is
+    embedded into a self-extracting Stone .py script. Independent of the
+    global `masquerade` toggle — a per-row option for .py output only.
     """
     src_ext = normalize_ext(src_ext)
     dst_ext = normalize_ext(dst_ext)
@@ -53,6 +87,81 @@ def convert_file(
     except OSError:
         src_size = 0
 
+    # Trailer-envelope round-trip short-circuit. If the source is a doc
+    # format (PDF / DOCX / EPUB) that carries a Transmute trailer envelope
+    # AND the target is a media format, recover the original source bytes
+    # directly from the trailer. This makes PNG -> PDF -> PNG byte-perfect
+    # WITHOUT requiring the Stone toggle, and supersedes both the Stone
+    # engagement and the regular reader (which would re-encode lossily).
+    media_dst_probe = fh.MEDIA_HANDLERS.get(dst_ext)
+    if media_dst_probe is not None and src_ext in (".pdf", ".docx", ".epub"):
+        origin = _try_trailer_envelope(src, src_ext)
+        if origin is not None:
+            payload, recovered_ext = origin
+            recovered_ext = normalize_ext(recovered_ext)
+            if recovered_ext == dst_ext:
+                # Exact match: write payload as-is.
+                dst.write_bytes(payload)
+                progress(1.0)
+                return
+            # Different target type. Try to re-encode via the recovered
+            # source's media handler — but only if both the recovered ext
+            # and the requested ext belong to the SAME media category
+            # (e.g. PNG trailer recovered, JPG requested → both image,
+            # image_handler can do PNG → JPG). If the categories differ
+            # (e.g. PNG trailer recovered, GLB requested), refuse with a
+            # clear error rather than silently falling through to a path
+            # that would either crash or produce garbage.
+            recovered_handler = fh.MEDIA_HANDLERS.get(recovered_ext)
+            if (recovered_handler is not None
+                    and recovered_handler is media_dst_probe
+                    and recovered_ext in getattr(recovered_handler, "SUPPORTED", set())
+                    and dst_ext in getattr(recovered_handler, "SUPPORTED", set())):
+                import tempfile
+                tmp_path = Path(tempfile.mkstemp(suffix=recovered_ext)[1])
+                try:
+                    tmp_path.write_bytes(payload)
+                    recovered_handler.convert(
+                        tmp_path, dst, recovered_ext, dst_ext, cancel, progress)
+                    return
+                finally:
+                    try: tmp_path.unlink()
+                    except OSError: pass
+            raise UnsupportedConversionError(
+                f"Cannot convert {src_ext} → {dst_ext}: this {src_ext} carries "
+                f"a recoverable {recovered_ext} payload, but {recovered_ext} → "
+                f"{dst_ext} crosses media categories (or the handler doesn't "
+                "support both ends). Convert to "
+                f"{recovered_ext} first, then to {dst_ext}."
+            )
+
+    # Compiler short-circuit (per-row, .py target only). Embeds the source
+    # bytes into a self-extracting Python script via the masquerade engine's
+    # .py host. Independent of the global Stone toggle — the user opts into
+    # this per-row by ticking "Compiler" when the target is .py. Lossy
+    # sources are excluded for the same reason as normal Stone (the round
+    # trip would not be meaningful).
+    if compiler and dst_ext == ".py":
+        from ..format_handlers import masquerade as _msq
+        if not _msq.is_lossy(src_ext):
+            # .py is always a 'doc' target — cross_category is True iff
+            # the source is media. Doesn't change behavior for .py (the
+            # self-extracting script is identical either way) but keeps
+            # the contract uniform.
+            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
+                         cross_category=_is_cross_category(src_ext, dst_ext))
+            return
+        # Lossy source + Compiler ON would silently fall through to a
+        # placeholder text bundle that bears no resemblance to what the
+        # user expected (a runnable .py reconstructing the original).
+        # Refuse explicitly instead.
+        raise UnsupportedConversionError(
+            f"Compiler mode requires a lossless source. {src_ext} is a "
+            "lossy format (the round-trip would not reconstruct the "
+            "original). Untick Compiler to convert as plain text, or "
+            "convert your source to a lossless format first."
+        )
+
     # Philosopher's Stone short-circuit. Two engagement conditions:
     #   1. dst is a Stone host (we want to embed src bytes into it) AND src
     #      is not a lossy format (lossy sources are excluded from Stone).
@@ -68,7 +177,8 @@ def convert_file(
         elif _msq.can_extract_from(src_ext) and _msq.has_envelope(src, src_ext):
             engage = True
         if engage:
-            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress)
+            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
+                         cross_category=_is_cross_category(src_ext, dst_ext))
             return
 
     media_src = fh.MEDIA_HANDLERS.get(src_ext)
@@ -107,19 +217,27 @@ def convert_file(
             f"adapter for {cat} → {dst_ext}."
         )
 
-    # Cross-category: document source → image target requires rasterization
-    # (rendering a PDF/HTML page to pixels). Out of scope this round —
-    # suggest Stone byte-passthrough as the workaround.
+    # Cross-category: document source → media target. True rasterization
+    # (PDF→PNG pixels) or text-to-speech synthesis (PDF→WAV audio) is out
+    # of scope, but the user's contract is that any conversion should
+    # succeed and be recoverable. So for doc → media we auto-engage the
+    # Stone envelope when the destination is a Stone host (PNG/BMP/WAV/MKV):
+    # the source bytes are embedded into a valid container of the target
+    # type, and converting back through Transmute extracts the original.
     if not media_src and media_dst:
-        if getattr(media_dst, "MEDIA_CATEGORY", "") == "image":
-            raise UnsupportedConversionError(
-                f"Rendering {src_ext} → {dst_ext} requires document "
-                "rasterization, not supported in v1. Try Philosopher's Stone "
-                "for byte-passthrough instead."
+        from ..format_handlers import masquerade as _msq
+        if _msq.can_embed_into(dst_ext) and not _msq.is_lossy(src_ext):
+            warnings.append(
+                f"{src_ext} → {dst_ext} has no semantic conversion path; "
+                "embedded the source via Philosopher's Stone. Convert the "
+                "output back through Transmute to recover the original."
             )
+            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
+                         cross_category=_is_cross_category(src_ext, dst_ext))
+            return
         raise UnsupportedConversionError(
-            f"Cannot convert {src_ext} → {dst_ext}: media and document "
-            "categories don't mix for this pair."
+            f"Cannot convert {src_ext} → {dst_ext}: no semantic path and "
+            f"{dst_ext} is not a Philosopher's Stone host."
         )
 
     reader = fh.READERS.get(src_ext)
@@ -168,7 +286,8 @@ def convert_file(
                 "stream — used byte-masquerade as fallback. Output is "
                 "byte-perfect but only round-trips through Transmute."
             )
-            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress)
+            _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
+                         cross_category=_is_cross_category(src_ext, dst_ext))
             return
         # No fallback available — let the whole-file path try and probably OOM
         # with a clear traceback in the log.

@@ -115,6 +115,84 @@ def hw_encoder_cache() -> Path:
     return bin_dir() / "hw_encoders.json"
 
 
+# ---------------------------------------------------------------------------
+# Binary discovery — single source of truth for FFmpeg/Assimp lookup.
+# Used by both launcher.py (early, before app starts) and runtime modules
+# (audio_video, masquerade, model_handler).
+# ---------------------------------------------------------------------------
+
+def _repo_bin_dir() -> "Path | None":
+    """Repo-relative bin/ folder, or None when running from a PyInstaller
+    bundle (where __file__ resolves into _internal/ and the lookup would
+    be useless)."""
+    if getattr(sys, "frozen", False) or getattr(sys, "_MEIPASS", None):
+        return None
+    return Path(__file__).resolve().parents[2] / "bin"
+
+
+def find_ffmpeg() -> "Path | None":
+    """Locate ffmpeg in this order:
+      1. UC_BIN_DIR (set by launcher to the actual found-ffmpeg parent)
+      2. bin_dir() (= UC_BIN_DIR or %LOCALAPPDATA%/Transmute/bin)
+      3. Repo-relative bin/ (covers `python -m app.main` without launcher)
+      4. PATH (system-wide install)
+    Returns None if nothing found.
+    """
+    import shutil
+    name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    dirs = [bin_dir()]
+    repo = _repo_bin_dir()
+    if repo is not None:
+        dirs.append(repo)
+    for d in dirs:
+        c = d / name
+        if c.exists():
+            return c
+    found = shutil.which("ffmpeg")
+    return Path(found) if found else None
+
+
+def find_ffprobe() -> "Path | None":
+    import shutil
+    name = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+    dirs = [bin_dir()]
+    repo = _repo_bin_dir()
+    if repo is not None:
+        dirs.append(repo)
+    for d in dirs:
+        c = d / name
+        if c.exists():
+            return c
+    found = shutil.which("ffprobe")
+    return Path(found) if found else None
+
+
+def find_assimp() -> "Path | None":
+    """Locate the Assimp DLL/SO. Honors UC_ASSIMP_DIR (set by launcher)
+    plus the legacy ASSIMP_DLL / ASSIMP_PATH env overrides."""
+    import shutil
+    names = ("assimp-vc143-mt.dll", "assimp.dll", "libassimp.dll",
+             "libassimp.so", "libassimp.dylib")
+    dirs = []
+    assimp_dir = os.environ.get("UC_ASSIMP_DIR")
+    if assimp_dir:
+        dirs.append(Path(assimp_dir))
+    dirs.append(bin_dir())
+    repo = _repo_bin_dir()
+    if repo is not None:
+        dirs.append(repo)
+    for d in dirs:
+        for name in names:
+            c = d / name
+            if c.exists():
+                return c
+    env = os.environ.get("ASSIMP_DLL") or os.environ.get("ASSIMP_PATH")
+    if env and Path(env).exists():
+        return Path(env)
+    found = shutil.which("assimp-vc143-mt") or shutil.which("assimp")
+    return Path(found) if found else None
+
+
 def wheels_dir() -> Path:
     """Optional offline pip wheel cache. Read-only at runtime — beside the
     app for portable installs, ignored if absent."""
