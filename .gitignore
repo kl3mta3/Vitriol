@@ -6,6 +6,7 @@ venv/
 .env
 build/
 dist/
+node_modules/
 *.spec
 
 bin/*
@@ -20,5 +21,8 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-
+.vscode/
+.idea/
+*.swp
+*.swo
 *.log
