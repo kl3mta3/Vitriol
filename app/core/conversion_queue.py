@@ -9,6 +9,7 @@ import atexit
 import hashlib
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -71,6 +72,23 @@ class _Runnable(QRunnable):
         def emit_elapsed() -> None:
             sig.elapsed.emit(job.id, time.monotonic() - start)
 
+        # Background ticker: emits elapsed every 250 ms so the per-row
+        # timer keeps ticking even when the conversion code itself isn't
+        # reporting progress (e.g. the multi-second Mandelbrot keystream
+        # generation step). Stops as soon as run() exits.
+        ticker_stop = threading.Event()
+
+        def _ticker():
+            while not ticker_stop.wait(0.25):
+                try:
+                    emit_elapsed()
+                except Exception:
+                    return
+
+        ticker_thread = threading.Thread(target=_ticker, daemon=True,
+                                          name=f"transmute-ticker-{job.id}")
+        ticker_thread.start()
+
         def emit_bytes(p: float) -> None:
             if job.total_bytes <= 0:
                 return
@@ -127,6 +145,9 @@ class _Runnable(QRunnable):
         except Exception as e:
             _log.exception("job %d failed", job.id)
             sig.failed.emit(job.id, f"{type(e).__name__}: {e}")
+        finally:
+            ticker_stop.set()
+            ticker_thread.join(timeout=1.0)
 
     def _run_with_verify(self, job: Job, sig: "JobSignals", final_dst: Path,
                           warnings: list, on_progress, emit_elapsed) -> None:

@@ -502,8 +502,17 @@ class MainWindow(QMainWindow):
 
     def _on_job_elapsed(self, job_id: int, secs: float) -> None:
         w = self._job_to_widget.get(job_id)
-        if w:
+        if not w:
+            return
+        # The background ticker thread may emit elapsed events that arrive
+        # in the Qt event loop AFTER the row widget was already deleted
+        # (cancel + remove race). The Python ref still exists but the C++
+        # side is gone, so attribute access raises shiboken RuntimeError.
+        # Swallow it cleanly — a stale tick is harmless.
+        try:
             w.set_elapsed(secs)
+        except RuntimeError:
+            self._job_to_widget.pop(job_id, None)
 
     def _on_job_finished(self, job_id: int, path: str) -> None:
         w = self._job_to_widget.pop(job_id, None)

@@ -86,6 +86,11 @@ REQUIRED_PY = [
 
 
 def _missing_python_packages() -> list[tuple[str, str]]:
+    # PyInstaller-frozen builds bundle every Python dep at build time;
+    # pip subprocess against sys.executable would target the .exe (not a
+    # real Python) and fail. Skip the check entirely when frozen.
+    if getattr(sys, "frozen", False):
+        return []
     missing = []
     for import_name, pip_spec in REQUIRED_PY:
         try:
@@ -452,31 +457,40 @@ def main() -> int:
     finally:
         ui.close()
 
-    main_py = ROOT / "main.py"
-    if not main_py.exists():
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            alt = Path(meipass) / "main.py"
-            if alt.exists():
-                main_py = alt
-        if not main_py.exists():
-            print(f"main.py not found at {ROOT}", file=sys.stderr)
-            return 1
-
-    env = os.environ.copy()
-    # Point the runtime at the directory where we ACTUALLY found ffmpeg (and
-    # assimp), not blindly at the LocalAppData bin/. Fixes the long-standing
-    # bug where the launcher would discover ffmpeg in <repo>/bin/ but the
-    # runtime would only check %LOCALAPPDATA%/Transmute/bin and fail.
+    # Set the env vars the runtime expects. In source-tree mode these get
+    # forwarded to a subprocess; in PyInstaller-frozen mode we just set
+    # them on os.environ so the in-process import of main sees them.
     ff = _find_ffmpeg()
     ai = _find_assimp()
-    env["UC_BIN_DIR"] = str(ff.parent if ff else BIN)
+    runtime_env = {
+        "UC_BIN_DIR": str(ff.parent if ff else BIN),
+        "UC_HW_CACHE": str(HW_CACHE),
+        "UC_RESOURCES_DIR": str(RESOURCES),
+        "UC_USER_DATA_DIR": str(USER_DATA),
+        "UC_DOCS_DIR": str(_paths.docs_dir()),
+    }
     if ai:
-        env["UC_ASSIMP_DIR"] = str(ai.parent)
-    env["UC_HW_CACHE"] = str(HW_CACHE)
-    env["UC_RESOURCES_DIR"] = str(RESOURCES)
-    env["UC_USER_DATA_DIR"] = str(USER_DATA)
-    env["UC_DOCS_DIR"] = str(_paths.docs_dir())
+        runtime_env["UC_ASSIMP_DIR"] = str(ai.parent)
+
+    if getattr(sys, "frozen", False):
+        # PyInstaller bundle. sys.executable points at Transmute.exe and
+        # cannot run arbitrary .py files via subprocess, so we import
+        # main and call it in-process. All Python deps were bundled at
+        # build time so the pip-install step earlier was a no-op.
+        os.environ.update(runtime_env)
+        try:
+            import main as _main
+        except ImportError as e:
+            print(f"frozen import of main failed: {e}", file=sys.stderr)
+            return 1
+        return _main.main()
+
+    main_py = ROOT / "main.py"
+    if not main_py.exists():
+        print(f"main.py not found at {ROOT}", file=sys.stderr)
+        return 1
+    env = os.environ.copy()
+    env.update(runtime_env)
     rc = subprocess.call([sys.executable, str(main_py)], env=env)
     return rc
 

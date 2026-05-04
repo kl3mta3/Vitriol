@@ -255,27 +255,49 @@ def has_envelope(path: "Path", ext: str) -> bool:
 
 def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
                                     probe_bytes: int = 64 * 1024) -> bool:
-    """Read up to `probe_bytes` of pixel data; return True if MAGIC_V2 is
-    present either in the raw stream (same-category Stone) OR in the
-    Mandelbrot-XOR'd stream (cross-category Stone aesthetic)."""
+    """Return True if MAGIC_V2 is present either as a contiguous prefix
+    of the raw pixel stream (same-category Stone) OR via scatter-unpack
+    of the bit-packed bottom-4-bits stream (cross-category Stone).
+
+    For the same-category case a 64 KB probe is enough — the magic sits
+    in the first byte. For the bit-packed scatter case the envelope's
+    first 8 bytes are scattered across the full image, so we must read
+    ALL pixel bytes to reconstruct them. Cost: ~12 MB for a 2048² image,
+    bounded and one-shot per conversion."""
     scratch = bytearray()
+    found_plain = False
+    # Streaming probe for the contiguous magic — exit early once we either
+    # find it or hit the probe limit.
     for chunk in pixel_iter:
         scratch.extend(chunk)
         if MAGIC_V2 in scratch:
-            return True
+            found_plain = True
+            break
         if len(scratch) >= probe_bytes:
             break
+    if found_plain:
+        # Drain the rest of the iterator so resources close cleanly,
+        # then return True.
+        try:
+            for _ in pixel_iter:
+                pass
+        except Exception:
+            pass
+        return True
+    # Drain the rest of the iterator — we need the FULL image for scatter
+    # unpack since the magic is dispersed.
+    for chunk in pixel_iter:
+        scratch.extend(chunk)
     if not scratch:
         return False
-    # Mandelbrot bit-packed envelope: read the bottom 4 bits of each pixel
-    # byte and reassemble into a byte stream; check for MAGIC_V2.
-    max_env = len(scratch) // 2
-    if max_env >= 8:
-        env_prefix = _mandelbrot_unpack_envelope_from_pixels(
-            bytes(scratch), min(max_env, 64 * 1024))
-        if MAGIC_V2 in env_prefix:
-            return True
-    return False
+    total = len(scratch)
+    if total < 16:
+        return False
+    # Try scatter unpack of the first 64 envelope bytes — the magic is
+    # in those first 8 bytes when scatter-encoded.
+    env_prefix = _mandelbrot_unpack_envelope_from_pixels(
+        bytes(scratch), 64, total_pixel_bytes=total)
+    return MAGIC_V2 in env_prefix
 
 # MKV host parameters. 42 fps is intentional — non-standard rate that
 # fingerprints Masquerade output: combined with the UCMSv1 magic in the
@@ -1007,41 +1029,98 @@ _MANDELBROT_SALT = b"transmute-mandelbrot-v1"
 _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE = 2
 
 
+def _mandelbrot_scatter_indices(num_pairs: int) -> "Tuple[int, int]":
+    """Pick a stride coprime to num_pairs so envelope bytes scatter
+    uniformly across the image when written at positions
+    `(i * stride) mod num_pairs`. Returns (stride, _unused).
+
+    Stride is derived deterministically from num_pairs alone, so the
+    decoder uses identical scattering. ~62% (golden-ratio fraction) of
+    num_pairs gives well-distributed coverage."""
+    import math as _math
+    if num_pairs <= 1:
+        return 1, 0
+    target = max(7, int(num_pairs * 0.6180339887498949))
+    if target & 1 == 0:
+        target += 1
+    # Bump until coprime with num_pairs.
+    while _math.gcd(target, num_pairs) != 1:
+        target += 2
+        if target >= num_pairs:
+            return 1, 0  # degenerate fallback (always coprime to 1)
+    return target, 0
+
+
 def _mandelbrot_pack_envelope_into_fractal(envelope: bytes, fractal: bytes,
                                              total_pixel_bytes: int) -> bytes:
-    """Combine fractal pixel bytes (top 4 bits) with envelope nibbles
-    (bottom 4 bits). Returns a bytes of length `total_pixel_bytes`.
+    """NumPy-vectorized bit-pack with scatter. Each envelope byte's
+    nibbles land at a scattered pixel-pair position derived from the
+    image dimensions, so the data-noise spreads uniformly across the
+    image instead of concentrating as a band at the top.
 
-    `fractal` must be at least `total_pixel_bytes` long.
-    `envelope` may be shorter than total_pixel_bytes / 2 — bytes past
-    the envelope end get a zero nibble (so those pixels show the pure
-    fractal at full top-4-bit depth)."""
-    out = bytearray(total_pixel_bytes)
+    Top 4 bits of every pixel byte = fractal color (deterministic).
+    Bottom 4 bits = envelope nibble at position `(i * stride) mod num_pairs`
+    for envelope byte index i, OR zero (untouched fractal LSB) for
+    pixel pairs not assigned to any envelope byte.
+    """
+    import numpy as np
+    fractal_arr = np.frombuffer(fractal, dtype=np.uint8)[:total_pixel_bytes]
+    out = (fractal_arr & 0xF0).copy()
     env_len = len(envelope)
-    for i in range(total_pixel_bytes):
-        env_idx = i >> 1   # i // 2
-        if env_idx < env_len:
-            nibble_high = i & 1
-            byte = envelope[env_idx]
-            nib = (byte >> 4) if nibble_high else (byte & 0x0F)
-        else:
-            nib = 0
-        out[i] = (fractal[i] & 0xF0) | nib
-    return bytes(out)
+    if env_len > 0:
+        num_pairs = total_pixel_bytes // 2
+        n_pairs = min(env_len, num_pairs)
+        stride, _ = _mandelbrot_scatter_indices(num_pairs)
+        env_arr = np.frombuffer(envelope, dtype=np.uint8)[:n_pairs]
+        # Compute scattered pixel-pair index for each envelope byte.
+        idx = (np.arange(n_pairs, dtype=np.int64) * stride) % num_pairs
+        # Low nibbles to pixel byte 2*idx, high nibbles to 2*idx+1.
+        low_pos = 2 * idx
+        high_pos = low_pos + 1
+        # Compose: keep top 4 bits of fractal, OR in the envelope nibble.
+        # Use indexed assignment (numpy fancy indexing).
+        out[low_pos] = (fractal_arr[low_pos] & 0xF0) | (env_arr & 0x0F)
+        out[high_pos] = (fractal_arr[high_pos] & 0xF0) | (env_arr >> 4)
+        # Edge case: odd total_pixel_bytes — the very last byte (no pair).
+        if env_len > n_pairs and 2 * n_pairs < total_pixel_bytes:
+            out[total_pixel_bytes - 1] = (fractal_arr[total_pixel_bytes - 1] & 0xF0) | (env_arr[n_pairs - 1] & 0x0F if False else 0)
+    return out.tobytes()
 
 
 def _mandelbrot_unpack_envelope_from_pixels(pixel_bytes: bytes,
-                                              max_envelope_bytes: int) -> bytes:
-    """Reassemble envelope bytes from the bottom 4 bits of pixel_bytes.
-    Reads up to `max_envelope_bytes` bytes (or as many as fit). Returns
-    the recovered envelope prefix."""
-    n_env = min(max_envelope_bytes, len(pixel_bytes) // 2)
-    out = bytearray(n_env)
-    for b in range(n_env):
-        low = pixel_bytes[2 * b] & 0x0F
-        high = pixel_bytes[2 * b + 1] & 0x0F
-        out[b] = (high << 4) | low
-    return bytes(out)
+                                              max_envelope_bytes: int,
+                                              total_pixel_bytes: int = -1) -> bytes:
+    """NumPy-vectorized bit-unpack matching the scatter pattern from
+    _mandelbrot_pack_envelope_into_fractal. Reassembles envelope bytes
+    in original order from scattered pixel-pair positions.
+
+    `total_pixel_bytes` is the FULL image size used to compute the same
+    scatter stride as the encoder. Defaults to len(pixel_bytes) when -1
+    (caller provided the whole image). Must be passed explicitly when
+    `pixel_bytes` is a partial buffer (e.g. the 64 KB has_envelope probe)."""
+    import numpy as np
+    if total_pixel_bytes < 0:
+        total_pixel_bytes = len(pixel_bytes)
+    num_pairs_full = total_pixel_bytes // 2
+    available_pairs = len(pixel_bytes) // 2
+    if num_pairs_full == 0:
+        return b""
+    n_env = min(max_envelope_bytes, num_pairs_full)
+    if n_env == 0:
+        return b""
+    stride, _ = _mandelbrot_scatter_indices(num_pairs_full)
+    px = np.frombuffer(pixel_bytes, dtype=np.uint8)
+    idx = (np.arange(n_env, dtype=np.int64) * stride) % num_pairs_full
+    # When called with a partial buffer (probe), only positions that fall
+    # inside the buffer are readable. Mask out any indices past available_pairs;
+    # the envelope byte at those positions is unknown (return zero stub).
+    in_range = idx < available_pairs
+    out = np.zeros(n_env, dtype=np.uint8)
+    valid_idx = idx[in_range]
+    low = px[2 * valid_idx] & 0x0F
+    high = px[2 * valid_idx + 1] & 0x0F
+    out[in_range] = (high << 4) | low
+    return out.tobytes()
 
 
 def _mandelbrot_calc_image_dims(payload_size: int, ext_len: int) -> "Tuple[int, int]":
@@ -1064,16 +1143,24 @@ def _mandelbrot_calc_image_dims(payload_size: int, ext_len: int) -> "Tuple[int, 
     return side, side
 
 
-def _mandelbrot_keystream(width: int, height: int) -> bytes:
+def _mandelbrot_keystream(width: int, height: int,
+                           content_seed: bytes = b"") -> bytes:
     """Generate a deterministic full-size colored Mandelbrot keystream
     of length `width * height * 3` bytes (RGB-interleaved row-major).
 
-    Seed is derived from the image dimensions plus a fixed salt, so the
-    keystream is recoverable on the read side from the PNG/BMP container's
-    declared dimensions alone.
+    Seed material:
+      salt + width + height + content_seed
+
+    `content_seed` is optional source-dependent bytes (e.g. SHA-256 of
+    the envelope or a prefix of it). When supplied, two different sources
+    of the same dimensions produce visually distinct fractals. This is
+    purely cosmetic — the bit-pack decoder reads the bottom 4 bits of
+    each pixel byte directly and never needs the keystream, so the seed
+    can include arbitrary source-derived material without affecting
+    decoder logic.
     """
     from . import _mandelbrot as _m
-    seed_bytes = _MANDELBROT_SALT + struct.pack(">II", width, height)
+    seed_bytes = _MANDELBROT_SALT + struct.pack(">II", width, height) + content_seed
     seed = _m.derive_seed(seed_bytes)
     return _m.generate_keystream(width, height, seed)
 
@@ -1167,16 +1254,22 @@ def _build_mandelbrot_image(src_bytes: bytes, src_ext: str,
     payload_size = len(src_bytes)
     width, height = _mandelbrot_calc_image_dims(
         payload_size, len(src_ext.encode("utf-8")))
-    if cancel is not None:
-        cancel.check()
-    fractal = _mandelbrot_keystream(width, height)
-    if cancel is not None:
-        cancel.check()
     # Build the envelope verbatim (header + payload, no pad — pad is
     # implicit in the "envelope ends before pixel stream ends" gap, where
     # the bottom-4-bit nibble defaults to zero leaving the pure fractal).
     header = _v2_header_bytes(payload_size, src_ext, width, height)
     envelope = header + src_bytes
+    if cancel is not None:
+        cancel.check()
+    # Source-dependent fractal seed. Each distinct source (different
+    # bytes, even at the same payload size and extension) lands at a
+    # different fractal region. Cost: one SHA-256 of up to 64 KB —
+    # negligible. The decoder doesn't read this seed; it just extracts
+    # the bottom 4 bits of each pixel byte to recover the envelope.
+    content_seed = hashlib.sha256(envelope[:64 * 1024]).digest()
+    fractal = _mandelbrot_keystream(width, height, content_seed=content_seed)
+    if cancel is not None:
+        cancel.check()
     total_pixel_bytes = width * height * 3
     # Sanity: dims should always be large enough.
     if len(envelope) * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE > total_pixel_bytes:
