@@ -38,6 +38,7 @@ recoverable through Transmute via the symmetric decoder.
 from __future__ import annotations
 import hashlib
 import math
+import random
 import struct
 import zlib
 from typing import Iterator, List, Tuple
@@ -111,17 +112,68 @@ MINOR_QUALITY = ["m", "d", "T", "m", "m", "T", "T"]
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def _seed_params(envelope: bytes) -> Tuple[int, float, int, int]:
-    """Hash the envelope bytes (or any deterministic seed material) into
-    music parameters. The tempo is then snapped so that
-    `samples_per_beat = round(SAMPLE_RATE * 60 / tempo_bpm)` is exact —
-    this keeps the percussion grid locked to the chord grid for the
-    entire output, no drift over time.
+# Drum patterns: per-section beat patterns within a 4-beat measure.
+# Each entry is (kick_beats, click_beats), 0-indexed beats in the measure.
+# All entries land on a beat — never off-grid — so the on-grid rule holds.
+# Pattern variation between sections breaks the "regular transient every N
+# seconds" statistical fingerprint that pure kick-on-1 / click-on-3 produces.
+DRUM_PATTERNS: List[Tuple[List[int], List[int]]] = [
+    ([0],       [2]),         # pop default — kick on 1, click on 3
+    ([0, 2],    [1]),         # driving — kick on 1+3, click on 2
+    ([0],       [1, 3]),      # half-time — kick on 1, clicks on 2+4
+    ([0, 2],    [1, 3]),      # rock — kick on 1+3, clicks on 2+4
+    ([0],       [1, 2, 3]),   # sparse kick + busy clicks
+    ([0, 2],    [3]),         # off-beat lift — kick 1+3, click on the 4
+    ([0],       []),          # kick only, no click — minimal section
+    ([],        [0, 2]),      # click-only, no kick — breakdown section
+]
 
-      key_index   : 0..23  — 0..11 = major C..B, 12..23 = minor c..b
-      tempo_bpm   : 60..160, snapped to a beat-aligned tempo
-      progression : 0..len(PROGRESSIONS)-1
-      voicing     : 0=root, 1=first inversion, 2=second inversion
+
+# Section transformations: per-section key/mode shifts relative to the file's
+# base key. Each is (semitone_offset, flip_mode). Heavily biased toward the
+# tonic (offset=0, no flip) so the file feels like one song with occasional
+# excursions, not a random key-jumping medley. Modulation targets are all
+# closely related keys (IV, V, relative major/minor, ♭VII).
+SECTION_TRANSFORMS: List[Tuple[int, bool]] = [
+    (0,  False),   # tonic, same mode  ── 5 weighted entries below ↓
+    (0,  False),
+    (0,  False),
+    (0,  False),
+    (0,  False),
+    (5,  False),   # IV — subdominant, same mode
+    (7,  False),   # V — dominant, same mode
+    (9,  True),    # relative minor (from major) or relative major (from minor)
+    (-2, False),   # ♭VII — common rock/modal modulation
+]
+
+
+# Arpeggio patterns: indices into the chord-tone list, played as 8th-note
+# sequence on top of the held pad. Each chord has 3 tones (0=root, 1=third,
+# 2=fifth); we use modulo so longer patterns walk through octave-up tones too.
+# Adds melodic motion *within* each chord so 1.3-second held triads don't
+# feel like a sustained drone. Each section picks one (or `None` for an
+# ambient pad-only section, weighted in via the None entry below).
+ARP_PATTERNS: List[Tuple] = [
+    None,                          # ambient — no arpeggio, pad only
+    (0, 1, 2, 3),                  # ascending: root, third, fifth, octave-root
+    (3, 2, 1, 0),                  # descending: octave, fifth, third, root
+    (0, 2, 1, 2),                  # broken triad (Alberti-bass-style)
+    (0, 1, 2, 3, 2, 1, 0, 1),      # up-down (8 notes, two beats per cycle)
+    (0, 2, 4, 2),                  # wide intervals (root, fifth, ninth, fifth)
+    (0, 0, 2, 2),                  # rhythmic pulse on root + fifth
+]
+
+
+def _seed_params(envelope: bytes) -> Tuple[int, float]:
+    """File-wide music parameters seeded from the payload bytes. Tempo is
+    snapped so `samples_per_beat = round(SAMPLE_RATE * 60 / tempo_bpm)` is
+    exact — this keeps the percussion grid locked for the entire output.
+
+    Per-section parameters (progression, voicing, key offset, drum pattern)
+    are picked separately by `_plan_sections`.
+
+      key_index : 0..23  — 0..11 = major C..B, 12..23 = minor c..b
+      tempo_bpm : 60..160, snapped to a beat-aligned tempo
     """
     h = hashlib.sha256(envelope).digest()
     key_index = h[0] % 24
@@ -129,9 +181,55 @@ def _seed_params(envelope: bytes) -> Tuple[int, float, int, int]:
     tempo_raw = 60.0 + (tempo_byte / 255.0) * 100.0    # 60..160 BPM
     samples_per_beat = max(1, round(SAMPLE_RATE * 60.0 / tempo_raw))
     tempo_bpm = SAMPLE_RATE * 60.0 / samples_per_beat
-    progression = h[2] % len(PROGRESSIONS)
-    voicing = h[3] % 3
-    return key_index, tempo_bpm, progression, voicing
+    return key_index, tempo_bpm
+
+
+# A section descriptor: (start_frame, end_frame, key_offset_semitones,
+# mode_flip, progression_idx, voicing, drum_pattern_idx, arp_pattern_idx).
+SectionTuple = Tuple[int, int, int, bool, int, int, int, int]
+
+
+def _plan_sections(envelope: bytes, n_frames: int,
+                    samples_per_beat: int) -> List[SectionTuple]:
+    """Plan a verse/chorus/bridge-style section schedule for the file.
+
+    Each section is 8–24 measures long (variable, seeded from the envelope
+    hash so the section-length pattern itself isn't a regular grid). Each
+    section gets its own progression, voicing, drum pattern, and key
+    transformation relative to the file's base key. The mix is biased
+    toward staying on the tonic so a file feels like one song with
+    occasional excursions, not a key-jumping medley.
+
+    Section seeds are derived via HMAC(envelope, section_idx) so we have
+    32 fresh bytes per section regardless of how many sections we need —
+    a 100 MB payload (~75 minutes of audio) needs ~470 sections, far more
+    than a single SHA-256 of the envelope could supply.
+    """
+    samples_per_measure = samples_per_beat * 4
+    if samples_per_measure <= 0 or n_frames <= 0:
+        return []
+    sections: List[SectionTuple] = []
+    cursor = 0
+    sec_idx = 0
+    while cursor < n_frames:
+        h = hashlib.sha256(envelope + b"section:" + sec_idx.to_bytes(4, "big")).digest()
+        section_measures = 8 + (h[0] % 17)   # 8..24 inclusive
+        section_frames = section_measures * samples_per_measure
+        end = min(cursor + section_frames, n_frames)
+        key_offset, mode_flip = SECTION_TRANSFORMS[h[1] % len(SECTION_TRANSFORMS)]
+        # First section always plays in the file's base key/mode so the
+        # listener gets oriented before any modulation.
+        if sec_idx == 0:
+            key_offset, mode_flip = 0, False
+        prog_idx = h[2] % len(PROGRESSIONS)
+        voicing = h[3] % 3
+        drum_idx = h[4] % len(DRUM_PATTERNS)
+        arp_idx = h[5] % len(ARP_PATTERNS)
+        sections.append((cursor, end, key_offset, mode_flip,
+                         prog_idx, voicing, drum_idx, arp_idx))
+        cursor = end
+        sec_idx += 1
+    return sections
 
 
 def _midi_to_hz(midi_note: int) -> float:
@@ -197,69 +295,139 @@ def _synth_click(samples_per_beat: int) -> List[int]:
 
 
 def _generate_music_samples(n_frames: int, key_index: int,
-                             tempo_bpm: float, progression_idx: int,
-                             voicing: int = 0,
+                             tempo_bpm: float,
+                             sections: List[SectionTuple],
+                             jitter_rng: random.Random,
                              ) -> Iterator[Tuple[int, int]]:
     """Yield exactly n_frames (left, right) sample tuples in the music
     amplitude range (signed; payload bits will be packed in by the caller).
 
-    The tempo is assumed pre-snapped by `_seed_params` so that
-    `samples_per_beat` is an exact integer — this keeps percussion locked
-    to the chord grid for the duration of the output."""
-    is_minor = key_index >= 12
-    tonic_offset = key_index % 12  # 0=C, 1=C#, ..., 11=B
-    intervals = MINOR_INTERVALS if is_minor else MAJOR_INTERVALS
-    qualities = MINOR_QUALITY if is_minor else MAJOR_QUALITY
-    progression = PROGRESSIONS[progression_idx]
+    Walks through `sections` (verse/chorus/bridge schedule). Each section
+    can have its own progression, voicing, key offset, mode flip, and
+    drum pattern — giving a long file a song-like structure rather than a
+    single-progression drone.
 
-    # Tonic at MIDI 60 (C4) shifted by key offset; minor uses same root.
-    base_midi = 60 + tonic_offset
+    `jitter_rng` is a pre-seeded `random.Random` used to pick deterministic
+    ±3 ms micro-timing offsets on each kick/click hit. Same source bytes
+    → same RNG seed → same micro-timing pattern, so encoder is fully
+    deterministic. (Decoder doesn't care about jitter — it reads bit
+    values, not music.)"""
+    file_is_minor = key_index >= 12
+    file_tonic_offset = key_index % 12  # 0=C..11=B
+    file_base_midi = 60 + file_tonic_offset
 
-    # Beats per second; one chord per 2 beats by default.
     samples_per_beat = max(1, round(SAMPLE_RATE * 60.0 / tempo_bpm))
     samples_per_chord = samples_per_beat * 2
+    samples_per_measure = samples_per_beat * 4
 
-    # Pre-compute percussion: kick on beat 1, click on beat 3 of every
-    # 4-beat measure. Grid is sample-exact because samples_per_beat is
-    # integer (see _seed_params snap).
+    # Pre-compute percussion waveforms (same shape across all sections).
     kick = _synth_kick(samples_per_beat)
     click = _synth_click(samples_per_beat)
-    measure_samples = samples_per_beat * 4
-    click_offset = samples_per_beat * 2  # beat 3 (0-indexed)
+    micro_jitter_max = int(SAMPLE_RATE * 0.003)   # ±3 ms
+
+    # Pre-plan every drum hit in the file: scan each section's pattern
+    # over its measures, apply ±3 ms micro-timing, accumulate (start_frame,
+    # waveform) pairs. For typical files this is a few thousand entries —
+    # cheap, and lets the main loop just check a bucket per frame.
+    hits_by_start: dict[int, List[List[int]]] = {}
+    for sec_start, sec_end, _ko, _mf, _pi, _vo, drum_idx, _ai in sections:
+        kick_beats, click_beats = DRUM_PATTERNS[drum_idx]
+        # First measure that starts at-or-after sec_start.
+        first_m = (sec_start + samples_per_measure - 1) // samples_per_measure
+        last_m = (sec_end + samples_per_measure - 1) // samples_per_measure
+        for m in range(first_m, last_m):
+            measure_start = m * samples_per_measure
+            for b in kick_beats:
+                base = measure_start + b * samples_per_beat
+                jitter = jitter_rng.randint(-micro_jitter_max, micro_jitter_max)
+                start = base + jitter
+                if 0 <= start < n_frames:
+                    hits_by_start.setdefault(start, []).append([0, kick])
+            for b in click_beats:
+                base = measure_start + b * samples_per_beat
+                jitter = jitter_rng.randint(-micro_jitter_max, micro_jitter_max)
+                start = base + jitter
+                if 0 <= start < n_frames:
+                    hits_by_start.setdefault(start, []).append([0, click])
 
     # Attack/release envelope (50 ms each).
-    env_samples = int(SAMPLE_RATE * 0.05)
-    if env_samples < 1:
-        env_samples = 1
+    env_samples = max(1, int(SAMPLE_RATE * 0.05))
 
-    # Vibrato parameters.
-    vib_freq = 5.0  # Hz
-    vib_depth = 0.005  # 0.5% pitch variation
+    # Vibrato.
+    vib_freq = 5.0
+    vib_depth = 0.005
+    two_pi_over_sr = 2.0 * math.pi / SAMPLE_RATE
+
+    # Active drum hits — each entry is [current_offset_into_wave, wave_list].
+    active_hits: List[List] = []
+
+    # Section / chord state — recomputed when section or chord rolls over.
+    sec_idx = 0
+    cur_section = sections[0] if sections else (0, n_frames, 0, False, 0, 0, 0, 0)
+    (sec_start, sec_end, key_offset, mode_flip,
+     prog_idx, voicing, _drum_idx, arp_idx) = cur_section
+    section_is_minor = (not file_is_minor) if mode_flip else file_is_minor
+    section_intervals = MINOR_INTERVALS if section_is_minor else MAJOR_INTERVALS
+    section_qualities = MINOR_QUALITY if section_is_minor else MAJOR_QUALITY
+    section_base_midi = file_base_midi + key_offset
+    progression = PROGRESSIONS[prog_idx]
+    arp_pattern = ARP_PATTERNS[arp_idx]
 
     chord_index = 0
     chord_sample_pos = 0
     cur_chord_freqs: List[float] = []
+    cur_arp_freqs: List[float] = []
+    phases: List[float] = []
+    arp_phase = 0.0
+    arp_cur_idx = -1
 
-    def _refresh_chord():
-        nonlocal cur_chord_freqs
+    # Arpeggio note duration: 8th note (samples_per_beat // 2). Each held
+    # chord (samples_per_chord = 2 beats) carries 4 arpeggio notes.
+    samples_per_arp_note = max(1, samples_per_beat // 2)
+
+    def _refresh_chord() -> None:
+        nonlocal cur_chord_freqs, cur_arp_freqs, phases
         degree = progression[chord_index % len(progression)]
         scale_idx = (degree - 1) % 7
-        chord_root_midi = base_midi + intervals[scale_idx]
-        notes = _build_chord(chord_root_midi, qualities[scale_idx], voicing)
+        chord_root_midi = section_base_midi + section_intervals[scale_idx]
+        notes = _build_chord(chord_root_midi, section_qualities[scale_idx], voicing)
         cur_chord_freqs = [_midi_to_hz(n) for n in notes]
+        # Arpeggio pool: chord tones one octave up, plus same set two octaves
+        # up. Lets longer patterns walk into a higher register without
+        # clashing with the held pad in the chord-tone register.
+        cur_arp_freqs = ([_midi_to_hz(n + 12) for n in notes]
+                         + [_midi_to_hz(n + 24) for n in notes])
+        phases = [0.0 for _ in cur_chord_freqs]
 
     _refresh_chord()
-    # Per-voice phase accumulators (radians)
-    phases = [0.0 for _ in cur_chord_freqs]
 
-    two_pi_over_sr = 2.0 * math.pi / SAMPLE_RATE
     for f in range(n_frames):
-        # Roll over chord boundary.
+        # Section rollover.
+        if f >= sec_end and sec_idx + 1 < len(sections):
+            sec_idx += 1
+            cur_section = sections[sec_idx]
+            (sec_start, sec_end, key_offset, mode_flip,
+             prog_idx, voicing, _drum_idx, arp_idx) = cur_section
+            section_is_minor = (not file_is_minor) if mode_flip else file_is_minor
+            section_intervals = MINOR_INTERVALS if section_is_minor else MAJOR_INTERVALS
+            section_qualities = MINOR_QUALITY if section_is_minor else MAJOR_QUALITY
+            section_base_midi = file_base_midi + key_offset
+            progression = PROGRESSIONS[prog_idx]
+            arp_pattern = ARP_PATTERNS[arp_idx]
+            # Restart the progression on the I chord at every section
+            # boundary — sounds like a verse/chorus transition, lands the
+            # listener firmly back on the tonic at the new key.
+            chord_index = 0
+            chord_sample_pos = 0
+            arp_phase = 0.0
+            arp_cur_idx = -1
+            _refresh_chord()
+
+        # Chord rollover within the section.
         if chord_sample_pos >= samples_per_chord:
             chord_index += 1
             chord_sample_pos = 0
             _refresh_chord()
-            phases = [0.0 for _ in cur_chord_freqs]
 
         # Envelope (linear attack, sustained, linear release).
         if chord_sample_pos < env_samples:
@@ -269,32 +437,56 @@ def _generate_music_samples(n_frames: int, key_index: int,
         else:
             env = 1.0
 
-        # Vibrato modulator.
         vib = 1.0 + vib_depth * math.sin(two_pi_over_sr * vib_freq * f)
 
-        # Sum voices. Per-voice amplitude is sized so an in-phase 3-voice
-        # constructive peak just reaches MUSIC_HEADROOM — the post-summation
-        # clamp catches the rare overshoot. Real chord material rarely
-        # phase-aligns, so typical RMS sits well below the cap.
-        n_voices = len(cur_chord_freqs)
-        amp_per_voice = MUSIC_HEADROOM // max(1, n_voices)
+        # Held pad: sum chord-tone voices. Per-voice amplitude sized so
+        # 3-voice constructive peaks reach ~70% of MUSIC_HEADROOM, leaving
+        # ~30% headroom for the arpeggio voice on top before the soft-clip.
+        n_voices = max(1, len(cur_chord_freqs))
+        pad_amp_per_voice = (MUSIC_HEADROOM * 7 // 10) // n_voices
         sample_value = 0
         for i, base_freq in enumerate(cur_chord_freqs):
             freq = base_freq * vib
             phases[i] += two_pi_over_sr * freq
-            sample_value += int(amp_per_voice * env * math.sin(phases[i]))
+            sample_value += int(pad_amp_per_voice * env * math.sin(phases[i]))
 
-        # Percussion overlay (mono, summed into both channels). Locked to
-        # the beat grid: kick on beat 1, click on beat 3 of every measure.
-        f_in_measure = f % measure_samples
-        if f_in_measure < len(kick):
-            sample_value += kick[f_in_measure]
-        delta = f_in_measure - click_offset
-        if 0 <= delta < len(click):
-            sample_value += click[delta]
+        # Arpeggio voice: walks chord tones at 8th-note rate, providing
+        # melodic motion *within* each held chord. Section-seeded pattern
+        # (or `None` for ambient pad-only sections).
+        if arp_pattern is not None and cur_arp_freqs:
+            arp_pos_in_chord = chord_sample_pos
+            pattern_step = (arp_pos_in_chord // samples_per_arp_note) % len(arp_pattern)
+            new_arp_idx = arp_pattern[pattern_step] % len(cur_arp_freqs)
+            if new_arp_idx != arp_cur_idx:
+                arp_phase = 0.0  # crisp re-attack on each new note
+                arp_cur_idx = new_arp_idx
+            arp_freq = cur_arp_freqs[arp_cur_idx]
+            arp_phase += two_pi_over_sr * arp_freq * vib
+            # Per-note pluck envelope: instant attack, exponential decay over
+            # the duration of one 8th note. Quieter than the pad so it sits
+            # ON the chord, not over it.
+            note_pos = arp_pos_in_chord % samples_per_arp_note
+            arp_env = math.exp(-3.0 * note_pos / samples_per_arp_note)
+            arp_amp = MUSIC_HEADROOM // 5   # ~20% of headroom
+            sample_value += int(arp_amp * env * arp_env * math.sin(arp_phase))
 
-        # Soft saturation guard so payload bits aren't clipped at the top
-        # of the int16 range. Hits ±MUSIC_HEADROOM only on rare summed peaks.
+        # Spawn any drum hits starting at this frame (with ±3 ms jitter
+        # already baked in by the section planner above).
+        starts_here = hits_by_start.get(f)
+        if starts_here:
+            active_hits.extend(starts_here)
+
+        # Mix every active drum hit, advance offsets, drop finished hits.
+        if active_hits:
+            still_active: List[List] = []
+            for hit in active_hits:
+                off, wave = hit[0], hit[1]
+                if off < len(wave):
+                    sample_value += wave[off]
+                    hit[0] = off + 1
+                    still_active.append(hit)
+            active_hits = still_active
+
         if sample_value > MUSIC_HEADROOM - 1:
             sample_value = MUSIC_HEADROOM - 1
         elif sample_value < -MUSIC_HEADROOM:
@@ -356,29 +548,42 @@ def _samples_to_pcm_be16(samples: Iterator[Tuple[int, int]]) -> Iterator[bytes]:
         yield struct.pack(">hh", left, right)
 
 
+def _build_synthesis_inputs(payload: bytes, n_frames: int):
+    """Shared setup for all four encode entrypoints. Returns
+    (key_index, tempo_bpm, sections, jitter_rng).
+
+    `payload` is whatever bytes will be bit-packed (uM01 header + zlib
+    compressed envelope for legacy, raw v3 envelope for v3). The seeds
+    are derived from it so identical payloads produce identical music.
+    """
+    key_index, tempo_bpm = _seed_params(payload)
+    samples_per_beat = max(1, round(SAMPLE_RATE * 60.0 / tempo_bpm))
+    sections = _plan_sections(payload, n_frames, samples_per_beat)
+    # Seed the jitter RNG from the payload hash. Same source → same
+    # micro-timing pattern, deterministic across encodes.
+    jitter_seed = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+    jitter_rng = random.Random(jitter_seed)
+    return key_index, tempo_bpm, sections, jitter_rng
+
+
 def encode_music_payload(envelope: bytes) -> Tuple[bytes, int]:
     """LEGACY (uM01) audio Stone path. Compresses the envelope with zlib,
     prepends a 12-byte uM01 header, and bit-packs into LE PCM samples.
 
-    Kept for two reasons:
-      1. Same-category audio targets that flow through the music encoder
-         (currently none — same-category WAV/AIFF use _wav_embed not
-         _wav_embed_music — but harmless to keep available).
-      2. Decoder backward-compatibility with audio Stone files generated
-         before MAGIC_V3_AUDIO shipped (decode_music_payload_le still
-         expects the uM01 header).
-
-    NEW v3 audio Stone files use `encode_music_envelope` instead — no
-    zlib (ciphertext is already incompressible) and the v3 envelope
-    carries its own self-describing header.
+    Kept for decoder backward-compatibility with audio Stone files
+    generated before MAGIC_V3_AUDIO shipped. NEW v3 audio Stone files
+    use `encode_music_envelope` instead — no zlib (ciphertext is already
+    incompressible) and the v3 envelope carries its own self-describing
+    header.
     """
     compressed = zlib.compress(envelope, level=6)
     header = b"uM01" + struct.pack(">II", len(envelope), len(compressed))
     full_payload = header + compressed
-    key_index, tempo_bpm, progression, voicing = _seed_params(full_payload)
     n_frames = _frames_for_bytes(len(full_payload))
+    key_index, tempo_bpm, sections, jitter_rng = _build_synthesis_inputs(
+        full_payload, n_frames)
     samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
-                                       progression, voicing)
+                                       sections, jitter_rng)
     embedded = _pack_payload_into_samples(samples, full_payload)
     out = bytearray()
     for chunk in _samples_to_pcm_le16(embedded):
@@ -391,10 +596,11 @@ def encode_music_payload_be(envelope: bytes) -> Tuple[bytes, int]:
     compressed = zlib.compress(envelope, level=6)
     header = b"uM01" + struct.pack(">II", len(envelope), len(compressed))
     full_payload = header + compressed
-    key_index, tempo_bpm, progression, voicing = _seed_params(full_payload)
     n_frames = _frames_for_bytes(len(full_payload))
+    key_index, tempo_bpm, sections, jitter_rng = _build_synthesis_inputs(
+        full_payload, n_frames)
     samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
-                                       progression, voicing)
+                                       sections, jitter_rng)
     embedded = _pack_payload_into_samples(samples, full_payload)
     out = bytearray()
     for chunk in _samples_to_pcm_be16(embedded):
@@ -407,10 +613,11 @@ def encode_music_envelope(envelope: bytes) -> Tuple[bytes, int]:
     envelope built by `masquerade._v3_audio_envelope` — magic + length +
     IV + salt + ciphertext. Bit-packs verbatim into LE PCM samples (no
     zlib wrapper, no extra header)."""
-    key_index, tempo_bpm, progression, voicing = _seed_params(envelope)
     n_frames = _frames_for_bytes(len(envelope))
+    key_index, tempo_bpm, sections, jitter_rng = _build_synthesis_inputs(
+        envelope, n_frames)
     samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
-                                       progression, voicing)
+                                       sections, jitter_rng)
     embedded = _pack_payload_into_samples(samples, envelope)
     out = bytearray()
     for chunk in _samples_to_pcm_le16(embedded):
@@ -420,10 +627,11 @@ def encode_music_envelope(envelope: bytes) -> Tuple[bytes, int]:
 
 def encode_music_envelope_be(envelope: bytes) -> Tuple[bytes, int]:
     """NEW v3 BE-PCM variant for AIFF. See encode_music_envelope."""
-    key_index, tempo_bpm, progression, voicing = _seed_params(envelope)
     n_frames = _frames_for_bytes(len(envelope))
+    key_index, tempo_bpm, sections, jitter_rng = _build_synthesis_inputs(
+        envelope, n_frames)
     samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
-                                       progression, voicing)
+                                       sections, jitter_rng)
     embedded = _pack_payload_into_samples(samples, envelope)
     out = bytearray()
     for chunk in _samples_to_pcm_be16(embedded):

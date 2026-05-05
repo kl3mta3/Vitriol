@@ -139,7 +139,22 @@ class PlaylistItemWidget(QWidget):
         self.stone_lock_btn.setObjectName("StoneLock")
         self.stone_lock_btn.setFlat(True)
         self.stone_lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.stone_lock_btn.setFixedWidth(34)
+        # Size the emoji glyph proportional to other row controls. Default
+        # Qt button rendering would clip the lock at ~10pt with no padding;
+        # bump font-size + give 4px horizontal breathing room.
+        self.stone_lock_btn.setFixedSize(34, 28)
+        self.stone_lock_btn.setStyleSheet(
+            "QPushButton#StoneLock {"
+            " font-size: 16px;"
+            " padding: 0 4px;"
+            " border: none;"
+            " background: transparent;"
+            "}"
+            "QPushButton#StoneLock:hover {"
+            " background: rgba(255, 255, 255, 0.08);"
+            " border-radius: 4px;"
+            "}"
+        )
         self.stone_lock_btn.setToolTip(
             "Set Stone password (files round-trip with this password)")
         self.stone_lock_btn.clicked.connect(self._on_stone_lock_clicked)
