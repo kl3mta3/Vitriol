@@ -129,6 +129,23 @@ class PlaylistItemWidget(QWidget):
         self.compiler_checkbox.setVisible(False)
         layout.addWidget(self.compiler_checkbox)
 
+        # 6c. Stone password toggle — only visible when global Stone is on.
+        # Renders as 🔓 (no password set) or 🔒 (password set). Click opens
+        # a modal dialog. Per-row password is held in widget memory only —
+        # never written to disk. The byte string is forwarded to the queue
+        # via Job.password.
+        self._stone_password: bytes = b""
+        self.stone_lock_btn = QPushButton("\U0001F513")  # 🔓
+        self.stone_lock_btn.setObjectName("StoneLock")
+        self.stone_lock_btn.setFlat(True)
+        self.stone_lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stone_lock_btn.setFixedWidth(34)
+        self.stone_lock_btn.setToolTip(
+            "Set Stone password (files round-trip with this password)")
+        self.stone_lock_btn.clicked.connect(self._on_stone_lock_clicked)
+        self.stone_lock_btn.setVisible(self._masquerade)
+        layout.addWidget(self.stone_lock_btn)
+
         # 7. Save location field — stretches to fill remaining width.
         # Path text is ellipsized when the field is too narrow; full path
         # appears as tooltip on hover. Stretch factor 1 keeps it taking
@@ -206,6 +223,32 @@ class PlaylistItemWidget(QWidget):
             return False
         return self.compiler_checkbox.isChecked()
 
+    def stone_password(self) -> bytes:
+        """The user-set per-row Stone password. Empty bytes means use the
+        default app key (still encrypted, anyone with Transmute can decode).
+        Held in widget memory only; never persisted."""
+        return self._stone_password
+
+    def _on_stone_lock_clicked(self) -> None:
+        from .stone_password_dialog import StonePasswordDialog
+        dlg = StonePasswordDialog(current_password=self._stone_password, parent=self)
+        if dlg.exec() == dlg.DialogCode.Accepted:
+            chosen = dlg.selected_password()
+            if chosen is None:
+                return
+            self._stone_password = chosen
+            self._refresh_stone_lock_icon()
+
+    def _refresh_stone_lock_icon(self) -> None:
+        if self._stone_password:
+            self.stone_lock_btn.setText("\U0001F512")  # 🔒
+            self.stone_lock_btn.setToolTip(
+                "Stone password set — click to change or clear")
+        else:
+            self.stone_lock_btn.setText("\U0001F513")  # 🔓
+            self.stone_lock_btn.setToolTip(
+                "Set Stone password (files round-trip with this password)")
+
     def set_status(self, status: Status, error_msg: str | None = None) -> None:
         self._status = status
         self._is_running = status == Status.RUNNING
@@ -262,12 +305,20 @@ class PlaylistItemWidget(QWidget):
 
     def refresh_targets(self, masquerade: bool) -> None:
         """Re-populate dropdown when the global Masquerade toggle changes.
-        Preserves the user's selection if it's still valid."""
+        Preserves the user's selection if it's still valid. Also toggles
+        the Stone-password lock icon's visibility and clears any stored
+        per-row password when Stone goes OFF (passwords don't leak across
+        Stone-disabled state)."""
         previous = self.dst_combo.currentText()
         self._masquerade = masquerade
         self._populate_targets()
         if previous and self.dst_combo.findText(previous) >= 0:
             self.dst_combo.setCurrentText(previous)
+        # Lock icon visibility + clear-on-disable.
+        self.stone_lock_btn.setVisible(masquerade)
+        if not masquerade:
+            self._stone_password = b""
+            self._refresh_stone_lock_icon()
 
     def _default_save_dir(self) -> Path:
         """Pick the output folder based on the *target* extension's category.

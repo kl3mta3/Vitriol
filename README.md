@@ -64,12 +64,18 @@ The trade-off is a heavier app that always works offline, rather than a light ap
 
 When Philosopher's Stone is on AND the conversion crosses categories (e.g. `.pdf → .png`, `.txt → .wav`), the output gets aesthetic treatment:
 
-- **Image targets** (`.png`, `.bmp`) get a **Mandelbrot-derived XOR keystream** applied to the payload bytes before they're written into pixels. Each output is a unique deterministic fractal — same source produces the same image, different sources land in different regions of the Mandelbrot set.
-- **Audio targets** (`.wav`, `.aiff`, `.flac`) get **music-like sample data** — generated chord progressions in a key/tempo/progression deterministically chosen from the envelope header — with the source bytes packed into the bottom 4 bits of each 16-bit sample. Output is ~1.5–2× source size for compressible inputs (text, code, PDFs), ~3–4× for already-compressed inputs (PNGs, JPEGs, MP3s).
+- **Image targets** (`.png`, `.bmp`) render as **deterministic colored Mandelbrot fractals**. The source bytes hide in the bottom bit of each pixel byte (1 bit per channel = 3 bits per pixel). The top 7 bits per channel hold a real fractal at 128 levels per channel — perceptually identical to a "pure" fractal rendering. Output passes statistical "is this a real fractal?" tests: pixel compression ratio drops to ~0.03 (real fractals are 0.05–0.3, random noise is ~1.0). Each source picks one of 65 hand-curated viewports across the Mandelbrot boundary and one of 6 color-cycling palette algorithms (sin-wave, HSV cycle, two-color gradient, three-anchor blend, log ramp, inverted) — same source always produces the same image, different sources produce visibly distinct fractals.
+- **Audio targets** (`.wav`, `.aiff`, `.flac`) get **music-like sample data** — generated chord progressions in a key/tempo/progression deterministically chosen from the envelope header — with the source bytes packed into the bottom 4 bits of each 16-bit sample. Output is ~1.5–2× source size for compressible inputs, ~3–4× for already-compressed inputs.
 
-Both features preserve byte-perfect round-trip. Same-category Stone (e.g. `.png → .png`, `.mp3 → .wav`) is unchanged — no fractal, no music, just byte-passthrough.
+Both features preserve byte-perfect round-trip. Same-category Stone (e.g. `.png → .png`, `.mp3 → .wav`) is unchanged.
 
-**These are presentation features, not security or steganography.** The Mandelbrot keystream and the chord progression are derived from the file's PUBLIC envelope header — recoverable through Transmute, not encrypted. For actual encryption, use a purpose-built tool.
+### Stone encryption (per-row password)
+
+Every Stone PNG/BMP is **encrypted with AES-256-CTR**. With no user password, files use a built-in app-wide key — anyone with Transmute can decode them (same exposure level as the older non-encrypted Stone). With a user password set on a row (via the 🔓/🔒 lock icon next to the save-path field), only the same password decodes the file.
+
+The round-trip is purely mechanical: `WAV1 + "paper" → PNG1`, then `PNG1 + "paper" → WAV2` produces `WAV2 == WAV1` byte-for-byte. **Wrong password produces garbage output silently** — there is no "incorrect password" message, and Transmute does not detect that encryption was used. The format itself is the only key. Every Stone file looks structurally identical to every other Stone file; the bytes don't reveal which use a password and which don't.
+
+**Forgetting a password means the file is unrecoverable.** Transmute does not store, log, or persist passwords. They live in widget memory only and are forgotten when the row is removed or Stone mode is toggled off.
 
 **Verify Round-Trip** (only available with Philosopher's Stone on). After each conversion, immediately runs the reverse direction into a temp folder, hashes both files, and only commits the output if `sha256(reverse(forward(src))) == sha256(src)`. The temp folder is cleaned up on success, on verification failure, and on app exit.
 

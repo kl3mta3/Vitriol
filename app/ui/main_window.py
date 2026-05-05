@@ -356,6 +356,7 @@ class MainWindow(QMainWindow):
             masquerade=masq,
             verify_round_trip=verify,
             compiler=widget.compiler_enabled(),
+            password=widget.stone_password() if masq else b"",
         )
         self._job_to_widget[job_id] = widget
 

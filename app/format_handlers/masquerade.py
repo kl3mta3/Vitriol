@@ -44,6 +44,7 @@ from ..core.config import CHUNK_SIZE, streaming_threshold
 
 MAGIC = b"UCMSv1\0"
 MAGIC_V2 = b"UCMSv2\0\0"  # 8 bytes — tiered-image-dimensions envelope (PNG/BMP)
+MAGIC_V3 = b"UCMSv3\0\0"  # 8 bytes — encrypted Mandelbrot envelope (PNG/BMP)
 
 # Read-write capable host extensions. Used by the registry + dropdown filter
 # when Philosopher's Stone (a.k.a. Masquerade) mode is on.
@@ -255,19 +256,16 @@ def has_envelope(path: "Path", ext: str) -> bool:
 
 def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
                                     probe_bytes: int = 64 * 1024) -> bool:
-    """Return True if MAGIC_V2 is present either as a contiguous prefix
-    of the raw pixel stream (same-category Stone) OR via scatter-unpack
-    of the bit-packed bottom-4-bits stream (cross-category Stone).
+    """Return True if a Stone envelope is present in the pixel stream:
+      - Plain UCMSv2 magic in raw pixel bytes (same-category Stone), OR
+      - UCMSv3 magic via k=1 scatter-unpack (cross-category Stone v3), OR
+      - UCMSv2 magic via legacy k=4 scatter-unpack (older v2 Stone files).
 
-    For the same-category case a 64 KB probe is enough — the magic sits
-    in the first byte. For the bit-packed scatter case the envelope's
-    first 8 bytes are scattered across the full image, so we must read
-    ALL pixel bytes to reconstruct them. Cost: ~12 MB for a 2048² image,
-    bounded and one-shot per conversion."""
+    For the contiguous-magic case a 64 KB probe suffices. For scatter
+    cases the magic's bits are dispersed across the full image, so we
+    read ALL pixel bytes once. ~12 MB for 2048² RGB, bounded."""
     scratch = bytearray()
     found_plain = False
-    # Streaming probe for the contiguous magic — exit early once we either
-    # find it or hit the probe limit.
     for chunk in pixel_iter:
         scratch.extend(chunk)
         if MAGIC_V2 in scratch:
@@ -276,16 +274,13 @@ def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
         if len(scratch) >= probe_bytes:
             break
     if found_plain:
-        # Drain the rest of the iterator so resources close cleanly,
-        # then return True.
         try:
             for _ in pixel_iter:
                 pass
         except Exception:
             pass
         return True
-    # Drain the rest of the iterator — we need the FULL image for scatter
-    # unpack since the magic is dispersed.
+    # Drain the rest of the iterator so we have the whole image for scatter probes.
     for chunk in pixel_iter:
         scratch.extend(chunk)
     if not scratch:
@@ -293,11 +288,15 @@ def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
     total = len(scratch)
     if total < 16:
         return False
-    # Try scatter unpack of the first 64 envelope bytes — the magic is
-    # in those first 8 bytes when scatter-encoded.
-    env_prefix = _mandelbrot_unpack_envelope_from_pixels(
+    # Probe 1: UCMSv3 (k=1) bit-pack. Read the first 64 envelope bytes.
+    env_prefix_v3 = _mandelbrot_unpack_envelope_from_pixels(
         bytes(scratch), 64, total_pixel_bytes=total)
-    return MAGIC_V2 in env_prefix
+    if env_prefix_v3.startswith(MAGIC_V3):
+        return True
+    # Probe 2: legacy UCMSv2 (k=4) bit-pack for backward-compat.
+    env_prefix_v2 = _mandelbrot_unpack_envelope_from_pixels_v2_legacy(
+        bytes(scratch), 64, total_pixel_bytes=total)
+    return MAGIC_V2 in env_prefix_v2
 
 # MKV host parameters. 42 fps is intentional — non-standard rate that
 # fingerprints Masquerade output: combined with the UCMSv1 magic in the
@@ -1025,8 +1024,13 @@ _MANDELBROT_SALT = b"transmute-mandelbrot-v1"
 # envelope can be reassembled by reading the bottom 4 bits across the
 # pixel stream in order.
 
-# Two pixel bytes carry one envelope byte (low nibble first, then high).
-_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE = 2
+# Stone v3 bit-pack: 1 bit of payload per pixel byte (k=1).
+# Eight pixel bytes carry one envelope byte. Top 7 bits per pixel byte
+# hold the fractal at 128 levels per channel (perceptually pristine).
+_PAYLOAD_BITS_PER_CHANNEL = 1
+_PAYLOAD_MASK = (1 << _PAYLOAD_BITS_PER_CHANNEL) - 1   # = 0b1
+_FRACTAL_MASK = (~_PAYLOAD_MASK) & 0xFF                 # = 0b11111110
+_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE = 8 // _PAYLOAD_BITS_PER_CHANNEL  # = 8
 
 
 def _mandelbrot_scatter_indices(num_pairs: int) -> "Tuple[int, int]":
@@ -1053,37 +1057,39 @@ def _mandelbrot_scatter_indices(num_pairs: int) -> "Tuple[int, int]":
 
 def _mandelbrot_pack_envelope_into_fractal(envelope: bytes, fractal: bytes,
                                              total_pixel_bytes: int) -> bytes:
-    """NumPy-vectorized bit-pack with scatter. Each envelope byte's
-    nibbles land at a scattered pixel-pair position derived from the
-    image dimensions, so the data-noise spreads uniformly across the
-    image instead of concentrating as a band at the top.
+    """NumPy-vectorized bit-pack with scatter, k=1. Each envelope byte's
+    8 bits land at scattered pixel-octet positions derived from image
+    dimensions, so the data-noise (1 bit per channel) spreads uniformly.
 
-    Top 4 bits of every pixel byte = fractal color (deterministic).
-    Bottom 4 bits = envelope nibble at position `(i * stride) mod num_pairs`
-    for envelope byte index i, OR zero (untouched fractal LSB) for
-    pixel pairs not assigned to any envelope byte.
+    Top 7 bits of every pixel byte = fractal color (128 levels — pristine).
+    Bottom 1 bit = one payload bit at scattered position
+    `(i * stride) mod num_octets` for envelope byte index i, OR untouched
+    fractal LSB (≡ zero — see fractal palette code) for octets past the
+    envelope.
     """
     import numpy as np
     fractal_arr = np.frombuffer(fractal, dtype=np.uint8)[:total_pixel_bytes]
-    out = (fractal_arr & 0xF0).copy()
+    # Start with fractal top bits, payload bit cleared
+    out = (fractal_arr & _FRACTAL_MASK).copy()
     env_len = len(envelope)
     if env_len > 0:
-        num_pairs = total_pixel_bytes // 2
-        n_pairs = min(env_len, num_pairs)
-        stride, _ = _mandelbrot_scatter_indices(num_pairs)
-        env_arr = np.frombuffer(envelope, dtype=np.uint8)[:n_pairs]
-        # Compute scattered pixel-pair index for each envelope byte.
-        idx = (np.arange(n_pairs, dtype=np.int64) * stride) % num_pairs
-        # Low nibbles to pixel byte 2*idx, high nibbles to 2*idx+1.
-        low_pos = 2 * idx
-        high_pos = low_pos + 1
-        # Compose: keep top 4 bits of fractal, OR in the envelope nibble.
-        # Use indexed assignment (numpy fancy indexing).
-        out[low_pos] = (fractal_arr[low_pos] & 0xF0) | (env_arr & 0x0F)
-        out[high_pos] = (fractal_arr[high_pos] & 0xF0) | (env_arr >> 4)
-        # Edge case: odd total_pixel_bytes — the very last byte (no pair).
-        if env_len > n_pairs and 2 * n_pairs < total_pixel_bytes:
-            out[total_pixel_bytes - 1] = (fractal_arr[total_pixel_bytes - 1] & 0xF0) | (env_arr[n_pairs - 1] & 0x0F if False else 0)
+        num_octets = total_pixel_bytes // _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+        n_env = min(env_len, num_octets)
+        stride, _ = _mandelbrot_scatter_indices(num_octets)
+        env_arr = np.frombuffer(envelope, dtype=np.uint8)[:n_env]
+        # Scattered octet index for each envelope byte.
+        octet_idx = (np.arange(n_env, dtype=np.int64) * stride) % num_octets
+        # Each octet starts at pixel byte position octet_idx * 8.
+        base = octet_idx * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+        # For each envelope byte, write 8 bits at positions base+0..base+7.
+        # np.unpackbits explodes [n] uint8 → [n*8] uint8 of {0,1}, big-endian
+        # bit order (MSB first). We want LSB-first so bit i goes to byte i:
+        # use ">u1" view + bit-reverse, OR just: bits[i*8 + b] = (env[i] >> b) & 1.
+        bits = np.unpackbits(env_arr).reshape(n_env, 8)[:, ::-1].reshape(-1)
+        # Compute the 8 destination indices per envelope byte.
+        offsets = np.arange(_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE, dtype=np.int64)
+        dest = (base[:, None] + offsets[None, :]).reshape(-1)
+        out[dest] = (fractal_arr[dest] & _FRACTAL_MASK) | bits
     return out.tobytes()
 
 
@@ -1091,8 +1097,8 @@ def _mandelbrot_unpack_envelope_from_pixels(pixel_bytes: bytes,
                                               max_envelope_bytes: int,
                                               total_pixel_bytes: int = -1) -> bytes:
     """NumPy-vectorized bit-unpack matching the scatter pattern from
-    _mandelbrot_pack_envelope_into_fractal. Reassembles envelope bytes
-    in original order from scattered pixel-pair positions.
+    _mandelbrot_pack_envelope_into_fractal at k=1. Reassembles envelope
+    bytes from 8 scattered pixel-byte LSBs each.
 
     `total_pixel_bytes` is the FULL image size used to compute the same
     scatter stride as the encoder. Defaults to len(pixel_bytes) when -1
@@ -1101,38 +1107,44 @@ def _mandelbrot_unpack_envelope_from_pixels(pixel_bytes: bytes,
     import numpy as np
     if total_pixel_bytes < 0:
         total_pixel_bytes = len(pixel_bytes)
-    num_pairs_full = total_pixel_bytes // 2
-    available_pairs = len(pixel_bytes) // 2
-    if num_pairs_full == 0:
+    num_octets_full = total_pixel_bytes // _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+    available_octets = len(pixel_bytes) // _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+    if num_octets_full == 0:
         return b""
-    n_env = min(max_envelope_bytes, num_pairs_full)
+    n_env = min(max_envelope_bytes, num_octets_full)
     if n_env == 0:
         return b""
-    stride, _ = _mandelbrot_scatter_indices(num_pairs_full)
+    stride, _ = _mandelbrot_scatter_indices(num_octets_full)
     px = np.frombuffer(pixel_bytes, dtype=np.uint8)
-    idx = (np.arange(n_env, dtype=np.int64) * stride) % num_pairs_full
-    # When called with a partial buffer (probe), only positions that fall
-    # inside the buffer are readable. Mask out any indices past available_pairs;
-    # the envelope byte at those positions is unknown (return zero stub).
-    in_range = idx < available_pairs
+    octet_idx = (np.arange(n_env, dtype=np.int64) * stride) % num_octets_full
+    base = octet_idx * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+    in_range = base + (_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE - 1) < len(pixel_bytes)
     out = np.zeros(n_env, dtype=np.uint8)
-    valid_idx = idx[in_range]
-    low = px[2 * valid_idx] & 0x0F
-    high = px[2 * valid_idx + 1] & 0x0F
-    out[in_range] = (high << 4) | low
+    valid_base = base[in_range]
+    if valid_base.size > 0:
+        offsets = np.arange(_MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE, dtype=np.int64)
+        # Shape: (n_valid, 8). Each row holds 8 pixel-byte LSBs in scatter order.
+        gathered = px[(valid_base[:, None] + offsets[None, :])] & _PAYLOAD_MASK
+        # Reverse to MSB-first so np.packbits assembles correctly.
+        bits = gathered[:, ::-1]
+        # packbits along axis -1 with bitorder='big' — assemble each 8-bit row to a byte.
+        bytes_recovered = np.packbits(bits.astype(np.uint8), axis=-1).reshape(-1)
+        out[in_range] = bytes_recovered
     return out.tobytes()
 
 
-def _mandelbrot_calc_image_dims(payload_size: int, ext_len: int) -> "Tuple[int, int]":
-    """Square (W, H) sized so the bit-packed envelope fits with the
-    Mandelbrot fractal showing across the whole image.
+def _mandelbrot_calc_image_dims(payload_size: int, ext_len: int = 0) -> "Tuple[int, int]":
+    """Square (W, H) sized so the bit-packed UCMSv3 envelope fits with
+    the Mandelbrot fractal showing across the whole image.
 
-    Total envelope bytes = header + payload.
-    Pixel bytes needed = 2 * envelope_bytes (low nibble + high nibble per byte).
+    `payload_size` here is interpreted as the FULL ENVELOPE byte count
+    (caller already added v3 overhead). The legacy `ext_len` parameter
+    is ignored — kept for backward-compat call signatures.
+
+    Pixel bytes needed = envelope_bytes × 8 (k=1: one bit per pixel byte).
     Pixels needed = pixel_bytes / 3 (3 channels per pixel).
     """
-    header_size = 8 + 1 + ext_len + 8 + 4 + 4   # 25 + ext_len
-    envelope_bytes = payload_size + header_size
+    envelope_bytes = payload_size
     pixel_bytes_needed = envelope_bytes * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
     pixels_needed = (pixel_bytes_needed + 2) // 3
     for cap, dim in _IMAGE_TIERS:
@@ -1187,12 +1199,13 @@ def _xor_pixel_iter(pixel_iter: "Iterator[bytes]", keystream: bytes):
 def _png_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            cancel: Optional["CancellationToken"] = None,
                            progress: Optional[Callable[[float], None]] = None,
-                           mandelbrot: bool = False) -> None:
+                           mandelbrot: bool = False,
+                           password: bytes = b"") -> None:
     from .streaming_image import stream_png_write
     payload_size = src_path.stat().st_size
     if mandelbrot:
         width, height, pixel_bytes = _build_mandelbrot_image(
-            src_path.read_bytes(), src_ext, cancel)
+            src_path.read_bytes(), src_ext, password=password, cancel=cancel)
         stream_png_write(dst, width, height, iter([pixel_bytes]), cancel, progress)
         return
     width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
@@ -1203,12 +1216,13 @@ def _png_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
 def _bmp_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
                            cancel: Optional["CancellationToken"] = None,
                            progress: Optional[Callable[[float], None]] = None,
-                           mandelbrot: bool = False) -> None:
+                           mandelbrot: bool = False,
+                           password: bytes = b"") -> None:
     from .streaming_image import stream_bmp_write
     payload_size = src_path.stat().st_size
     if mandelbrot:
         width, height, pixel_bytes = _build_mandelbrot_image(
-            src_path.read_bytes(), src_ext, cancel)
+            src_path.read_bytes(), src_ext, password=password, cancel=cancel)
         stream_bmp_write(dst, width, height, iter([pixel_bytes]), cancel, progress)
         return
     width, height = _calc_image_dims(payload_size, len(src_ext.encode("utf-8")))
@@ -1217,10 +1231,12 @@ def _bmp_embed_v2_to_file(src_path: Path, src_ext: str, dst: Path,
 
 
 def _png_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
-                              mandelbrot: bool = False) -> None:
+                              mandelbrot: bool = False,
+                              password: bytes = b"") -> None:
     from .streaming_image import stream_png_write
     if mandelbrot:
-        width, height, pixel_bytes = _build_mandelbrot_image(src_bytes, src_ext)
+        width, height, pixel_bytes = _build_mandelbrot_image(
+            src_bytes, src_ext, password=password)
         stream_png_write(dst, width, height, iter([pixel_bytes]))
         return
     width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
@@ -1229,10 +1245,12 @@ def _png_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
 
 
 def _bmp_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
-                              mandelbrot: bool = False) -> None:
+                              mandelbrot: bool = False,
+                              password: bytes = b"") -> None:
     from .streaming_image import stream_bmp_write
     if mandelbrot:
-        width, height, pixel_bytes = _build_mandelbrot_image(src_bytes, src_ext)
+        width, height, pixel_bytes = _build_mandelbrot_image(
+            src_bytes, src_ext, password=password)
         stream_bmp_write(dst, width, height, iter([pixel_bytes]))
         return
     width, height = _calc_image_dims(len(src_bytes), len(src_ext.encode("utf-8")))
@@ -1240,42 +1258,123 @@ def _bmp_embed_v2_from_bytes(src_bytes: bytes, src_ext: str, dst: Path,
     stream_bmp_write(dst, width, height, pixel_iter)
 
 
+def _build_inner_plaintext(payload: bytes, src_ext: str) -> bytes:
+    """The encrypted-payload-side blob: ext_len | ext | payload_len | payload.
+    Wrapped by AES-CTR in v3; no magic at this level (the v3 outer header
+    holds the magic)."""
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext
+    ext_bytes = src_ext.encode("utf-8")
+    if len(ext_bytes) > 255:
+        ext_bytes = ext_bytes[:255]
+    return (bytes([len(ext_bytes)]) + ext_bytes
+            + struct.pack(">Q", len(payload)) + payload)
+
+
+def _v3_envelope(payload: bytes, src_ext: str, width: int, height: int,
+                  password: bytes) -> bytes:
+    """Build the full UCMSv3 envelope:
+        MAGIC_V3 (8) | W (4) | H (4) | IV (16) | salt (4 reserved) | ciphertext
+
+    The inner plaintext (ext+payload) is AES-256-CTR encrypted under a
+    PBKDF2-derived key. Wrong password → garbage decryption with no oracle.
+    Same source + same password → identical ciphertext (deterministic IV).
+    """
+    from . import _stone_crypto as _sc
+    inner = _build_inner_plaintext(payload, src_ext)
+    iv, ciphertext = _sc.encrypt(inner, password)
+    salt_field = b"\x00\x00\x00\x00"  # reserved for future per-file salting
+    return (MAGIC_V3
+            + struct.pack(">II", width, height)
+            + iv + salt_field
+            + ciphertext)
+
+
+def _parse_v3_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
+    """Parse v3 envelope. Returns (payload, src_ext).
+
+    Wrong password produces garbage values for ext_len/ext/payload_len.
+    We CLAMP these to plausible ranges (don't error) so the no-oracle
+    invariant holds — the function returns *something* either way and
+    the user discovers correctness by whether the output file opens
+    normally."""
+    from . import _stone_crypto as _sc
+    if len(blob) < len(MAGIC_V3) + 8 + 16 + 4:
+        raise ValueError("v3 envelope: too short.")
+    if not blob.startswith(MAGIC_V3):
+        raise ValueError("v3 envelope: magic not found.")
+    p = len(MAGIC_V3)
+    width, height = struct.unpack(">II", blob[p:p + 8]); p += 8
+    iv = blob[p:p + 16]; p += 16
+    _salt = blob[p:p + 4]; p += 4   # reserved
+    ciphertext = blob[p:]
+    inner = _sc.decrypt(iv, ciphertext, password)
+    if len(inner) < 1:
+        # Truly empty ciphertext — give up rather than guess.
+        return b"", ".bin"
+    # Parse inner. Wrong password → these fields are random, but we
+    # CLAMP to plausible ranges to avoid raising, preserving no-oracle.
+    ext_len = inner[0]
+    if ext_len > 64 or 1 + ext_len + 8 > len(inner):
+        # Garbage. Treat the entire decrypted blob as raw payload with
+        # an unknown extension. User will see a file that doesn't open.
+        return inner[1:], ".bin"
+    src_ext = inner[1:1 + ext_len].decode("utf-8", errors="replace")
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext if src_ext else ".bin"
+    p = 1 + ext_len
+    payload_len = struct.unpack(">Q", inner[p:p + 8])[0]
+    p += 8
+    payload = inner[p:p + payload_len]
+    # If wrong password makes payload_len wildly wrong, just return what
+    # we have. No error — user's output file just won't open as expected.
+    if len(payload) != payload_len:
+        return payload, src_ext
+    return payload, src_ext
+
+
 def _build_mandelbrot_image(src_bytes: bytes, src_ext: str,
+                             password: bytes = b"",
                              cancel: Optional["CancellationToken"] = None
                              ) -> "Tuple[int, int, bytes]":
     """Build the bit-packed Mandelbrot image. Returns (width, height,
     pixel_bytes) ready to stream into stream_png_write / stream_bmp_write.
 
-    Image dims are sized via _mandelbrot_calc_image_dims so the bit-packed
-    envelope fits with the fractal occupying the full image. Each pixel
-    byte's top 4 bits = colored fractal; bottom 4 bits = envelope nibble
-    (or zero past the envelope, leaving the fractal undisturbed there).
+    The envelope is UCMSv3 — encrypted with a key derived from `password`
+    (PBKDF2 + AES-256-CTR). Empty password ⇒ default app key (anyone with
+    Transmute can decode). Non-empty password ⇒ only the same password
+    decodes the file.
+
+    Each pixel byte's top 7 bits = colored fractal; bottom 1 bit = one
+    payload bit (or zero past the envelope, leaving the fractal pure).
     """
-    payload_size = len(src_bytes)
-    width, height = _mandelbrot_calc_image_dims(
-        payload_size, len(src_ext.encode("utf-8")))
-    # Build the envelope verbatim (header + payload, no pad — pad is
-    # implicit in the "envelope ends before pixel stream ends" gap, where
-    # the bottom-4-bit nibble defaults to zero leaving the pure fractal).
-    header = _v2_header_bytes(payload_size, src_ext, width, height)
-    envelope = header + src_bytes
+    # Pre-build the inner plaintext to know the encrypted envelope size
+    # exactly (CTR mode preserves length; ciphertext is same size as
+    # inner plaintext + the v3 header overhead).
+    inner = _build_inner_plaintext(src_bytes, src_ext)
+    ENVELOPE_OVERHEAD = len(MAGIC_V3) + 8 + 16 + 4   # = 36 bytes
+    envelope_size = ENVELOPE_OVERHEAD + len(inner)
+    width, height = _mandelbrot_calc_image_dims(envelope_size, 0)
+
+    # Encrypt and assemble envelope
+    envelope = _v3_envelope(src_bytes, src_ext, width, height, password)
     if cancel is not None:
         cancel.check()
-    # Source-dependent fractal seed. Each distinct source (different
-    # bytes, even at the same payload size and extension) lands at a
-    # different fractal region. Cost: one SHA-256 of up to 64 KB —
-    # negligible. The decoder doesn't read this seed; it just extracts
-    # the bottom 4 bits of each pixel byte to recover the envelope.
+
+    # Source+password-dependent fractal seed. The encrypted envelope
+    # already incorporates the password; SHA-256 of its first 64 KB
+    # gives a unique seed per (source, password) pair. Decoder doesn't
+    # need this seed (it just reads the bottom bits of pixels).
     content_seed = hashlib.sha256(envelope[:64 * 1024]).digest()
     fractal = _mandelbrot_keystream(width, height, content_seed=content_seed)
     if cancel is not None:
         cancel.check()
     total_pixel_bytes = width * height * 3
-    # Sanity: dims should always be large enough.
     if len(envelope) * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE > total_pixel_bytes:
         raise RuntimeError(
             f"Mandelbrot dim calc bug: envelope={len(envelope)} bytes needs "
-            f"{len(envelope) * 2} pixel bytes but image holds {total_pixel_bytes}.")
+            f"{len(envelope) * _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE} "
+            f"pixel bytes but image holds {total_pixel_bytes}.")
     pixel_bytes = _mandelbrot_pack_envelope_into_fractal(
         envelope, fractal, total_pixel_bytes)
     return width, height, pixel_bytes
@@ -1340,27 +1439,32 @@ def _extract_v2_from_pixel_iter(pixel_iter: Iterator[bytes], dst_path: Path,
 
 
 def _png_extract_v2_to_file(src: Path, dst_path: Path,
-                             cancel: Optional["CancellationToken"] = None) -> str:
+                             cancel: Optional["CancellationToken"] = None,
+                             password: bytes = b"") -> str:
     from .streaming_image import stream_png_read
-    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_png_read)
+    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_png_read, password)
 
 
 def _bmp_extract_v2_to_file(src: Path, dst_path: Path,
-                             cancel: Optional["CancellationToken"] = None) -> str:
+                             cancel: Optional["CancellationToken"] = None,
+                             password: bytes = b"") -> str:
     from .streaming_image import stream_bmp_read
-    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_bmp_read)
+    return _extract_v2_dual_attempt(src, dst_path, cancel, stream_bmp_read, password)
 
 
 def _extract_v2_dual_attempt(src: Path, dst_path: Path,
                               cancel: Optional["CancellationToken"],
-                              stream_reader) -> str:
-    """Try plain v2 extraction first (same-category Stone — raw bytes in
-    pixels, MAGIC_V2 at start). If that fails, try the Mandelbrot bit-pack
-    extraction (cross-category Stone aesthetic — envelope nibbles in the
-    bottom 4 bits of each pixel byte).
+                              stream_reader,
+                              password: bytes = b"") -> str:
+    """Try three extraction paths in order:
+      1. Plain UCMSv2 byte-passthrough (raw envelope in pixel bytes).
+      2. Bit-packed UCMSv3 envelope (k=1, encrypted Mandelbrot Stone).
+      3. Bit-packed UCMSv2 envelope (k=4, legacy Mandelbrot Stone) for
+         backward-compat reading of older Stone files.
 
     Buffers the entire pixel byte stream into memory once. For 4096^2 RGB
-    that's 48 MB temporarily — acceptable for the size range Stone uses.
+    that's 48 MB; for huge cross-category Stone images at k=1, can be 200+
+    MB. Acceptable for the typical use case.
     """
     width, height, it = stream_reader(src, cancel)
     pixel_bytes = bytearray()
@@ -1369,22 +1473,61 @@ def _extract_v2_dual_attempt(src: Path, dst_path: Path,
             cancel.check()
         pixel_bytes.extend(chunk)
 
-    # Attempt 1: plain — raw byte stream with MAGIC_V2 at offset 0
-    # (same-category Stone byte-passthrough).
+    # Attempt 1: plain UCMSv2 raw byte stream with magic at offset 0.
     if len(pixel_bytes) >= 8 and bytes(pixel_bytes[:8]) == MAGIC_V2:
         return _extract_v2_from_pixel_iter(iter([bytes(pixel_bytes)]), dst_path, cancel)
 
-    # Attempt 2: Mandelbrot bit-packed envelope — read low 4 bits of each
-    # pixel byte and reassemble into envelope bytes.
-    max_envelope_bytes = len(pixel_bytes) // 2
-    if max_envelope_bytes >= 8:
+    # Attempt 2: bit-packed UCMSv3 envelope (k=1, encrypted).
+    total_bytes = len(pixel_bytes)
+    max_env_v3 = total_bytes // _MANDELBROT_PIXEL_BYTES_PER_ENVELOPE_BYTE
+    if max_env_v3 >= len(MAGIC_V3) + 8 + 16 + 4:
         envelope = _mandelbrot_unpack_envelope_from_pixels(
-            bytes(pixel_bytes), max_envelope_bytes)
+            bytes(pixel_bytes), max_env_v3, total_pixel_bytes=total_bytes)
+        if envelope[:len(MAGIC_V3)] == MAGIC_V3:
+            payload, src_ext = _parse_v3_envelope(bytes(envelope), password)
+            with open(dst_path, "wb") as out:
+                out.write(payload)
+            return src_ext
+
+    # Attempt 3: legacy bit-packed UCMSv2 envelope (k=4, pre-encryption).
+    legacy_pixel_bytes_per_byte = 2  # k=4 used 2 pixel bytes per envelope byte
+    max_env_v2 = total_bytes // legacy_pixel_bytes_per_byte
+    if max_env_v2 >= 8:
+        envelope = _mandelbrot_unpack_envelope_from_pixels_v2_legacy(
+            bytes(pixel_bytes), max_env_v2, total_pixel_bytes=total_bytes)
         if envelope[:8] == MAGIC_V2:
             return _extract_v2_from_pixel_iter(iter([envelope]), dst_path, cancel)
 
-    raise ValueError("v2 envelope: magic not found in plain pixel bytes "
-                     "or in the bottom-4-bit Mandelbrot bit-packed stream.")
+    raise ValueError("Stone envelope: no v2-plain, v3-bit-packed, or "
+                     "v2-bit-packed (legacy) magic found in pixel data.")
+
+
+def _mandelbrot_unpack_envelope_from_pixels_v2_legacy(
+        pixel_bytes: bytes, max_envelope_bytes: int,
+        total_pixel_bytes: int = -1) -> bytes:
+    """Backward-compat: unpack the OLD k=4 bit-pack format used before v3.
+    Each envelope byte = 4 bits (low) at pixel byte 2i + 4 bits (high) at
+    pixel byte 2i+1, scattered via the same golden-ratio stride logic."""
+    import numpy as np
+    if total_pixel_bytes < 0:
+        total_pixel_bytes = len(pixel_bytes)
+    num_pairs_full = total_pixel_bytes // 2
+    available_pairs = len(pixel_bytes) // 2
+    if num_pairs_full == 0:
+        return b""
+    n_env = min(max_envelope_bytes, num_pairs_full)
+    if n_env == 0:
+        return b""
+    stride, _ = _mandelbrot_scatter_indices(num_pairs_full)
+    px = np.frombuffer(pixel_bytes, dtype=np.uint8)
+    idx = (np.arange(n_env, dtype=np.int64) * stride) % num_pairs_full
+    in_range = idx < available_pairs
+    out = np.zeros(n_env, dtype=np.uint8)
+    valid_idx = idx[in_range]
+    low = px[2 * valid_idx] & 0x0F
+    high = px[2 * valid_idx + 1] & 0x0F
+    out[in_range] = (high << 4) | low
+    return out.tobytes()
 
 
 # ---------------------------------------------------------------------------
@@ -1704,14 +1847,14 @@ def can_extract_from(ext: str) -> bool:
     return ext in _EXTRACT or ext in (".mkv", ".py")
 
 
-def _try_extract(src: Path, src_ext: str) -> Tuple[bytes, str] | None:
+def _try_extract(src: Path, src_ext: str,
+                  password: bytes = b"") -> Tuple[bytes, str] | None:
     """Returns (payload, recovered_ext) if src is a Masquerade host with a
     valid envelope; None if no envelope or unsupported source ext.
 
-    NOTE: For path-based extractors (PNG v2, BMP v2, MKV, .py), this still
-    returns whole-payload bytes for back-compat with the existing convert()
-    flow. For huge payloads the new streaming convert path bypasses this and
-    extracts directly to dst.
+    `password` is forwarded to PNG/BMP extraction for v3 envelope decryption.
+    Other host types (TXT, MKV, PY, PLY, OBJ, GLB, AIFF, FLAC) currently
+    use the unencrypted v1/v2 envelope and ignore the password.
     """
     src_ext = src_ext.lower()
     try:
@@ -1729,12 +1872,12 @@ def _try_extract(src: Path, src_ext: str) -> Tuple[bytes, str] | None:
                 try: tmp.unlink()
                 except OSError: pass
         if src_ext == ".png":
-            # Try v2 first (envelope in pixel data), fall back to v1 (private chunk)
+            # Try v2/v3 first (envelope in pixel data), fall back to v1 (private chunk)
             try:
                 import tempfile
                 tmp = Path(tempfile.mkstemp(suffix=".tmp")[1])
                 try:
-                    ext = _png_extract_v2_to_file(src, tmp)
+                    ext = _png_extract_v2_to_file(src, tmp, password=password)
                     return tmp.read_bytes(), ext
                 finally:
                     try: tmp.unlink()
@@ -1746,7 +1889,7 @@ def _try_extract(src: Path, src_ext: str) -> Tuple[bytes, str] | None:
                 import tempfile
                 tmp = Path(tempfile.mkstemp(suffix=".tmp")[1])
                 try:
-                    ext = _bmp_extract_v2_to_file(src, tmp)
+                    ext = _bmp_extract_v2_to_file(src, tmp, password=password)
                     return tmp.read_bytes(), ext
                 finally:
                     try: tmp.unlink()
@@ -1762,22 +1905,26 @@ def _try_extract(src: Path, src_ext: str) -> Tuple[bytes, str] | None:
 
 def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
                cancel: Optional["CancellationToken"] = None,
-               cross_category: bool = False) -> None:
+               cross_category: bool = False,
+               password: bytes = b"") -> None:
     """Whole-bytes-in-memory embed. Used for small files.
 
-    `cross_category` triggers the aesthetic encoder: Mandelbrot XOR for
-    PNG/BMP image targets. Audio targets (WAV/AIFF/FLAC) get the music
-    encoder via separate dispatch (see _embed_audio_music below).
+    `cross_category` triggers the aesthetic encoder: Mandelbrot Stone for
+    PNG/BMP image targets, music encoder for WAV/AIFF/FLAC audio targets.
+    `password` is forwarded to image targets for the v3 envelope encryption.
+    Audio music encoder doesn't yet use the password (out of scope this round).
     """
     dst_ext = dst_ext.lower()
     if dst_ext == ".mkv":
         _mkv_embed_to_file(payload, src_ext, dst)
         return
     if dst_ext == ".png":
-        _png_embed_v2_from_bytes(payload, src_ext, dst, mandelbrot=cross_category)
+        _png_embed_v2_from_bytes(payload, src_ext, dst,
+                                  mandelbrot=cross_category, password=password)
         return
     if dst_ext == ".bmp":
-        _bmp_embed_v2_from_bytes(payload, src_ext, dst, mandelbrot=cross_category)
+        _bmp_embed_v2_from_bytes(payload, src_ext, dst,
+                                  mandelbrot=cross_category, password=password)
         return
     if dst_ext == ".wav" and cross_category:
         # Cross-category audio target: render music samples with payload
@@ -1820,28 +1967,31 @@ def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
 def _embed_streamed_to(dst: Path, src_path: Path, src_ext: str, dst_ext: str,
                         cancel: Optional["CancellationToken"] = None,
                         progress: Optional[Callable[[float], None]] = None,
-                        cross_category: bool = False) -> None:
+                        cross_category: bool = False,
+                        password: bytes = b"") -> None:
     """Path-based streaming embed. Used for files above the streaming threshold."""
     dst_ext = dst_ext.lower()
     if dst_ext == ".png":
         _png_embed_v2_to_file(src_path, src_ext, dst, cancel, progress,
-                              mandelbrot=cross_category)
+                              mandelbrot=cross_category, password=password)
         return
     if dst_ext == ".bmp":
         _bmp_embed_v2_to_file(src_path, src_ext, dst, cancel, progress,
-                              mandelbrot=cross_category)
+                              mandelbrot=cross_category, password=password)
         return
     if dst_ext == ".py":
         _py_embed_to_file(src_path, src_ext, dst, cancel)
         return
     # WAV / TXT / MKV: whole-file bytes API still used; fall through.
     src_bytes = src_path.read_bytes()
-    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel, cross_category=cross_category)
+    _embed_to(dst, src_bytes, src_ext, dst_ext, cancel,
+              cross_category=cross_category, password=password)
 
 
 def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
             cancel: CancellationToken, progress: Callable[[float], None],
-            *, cross_category: bool = False) -> None:
+            *, cross_category: bool = False,
+            password: bytes = b"") -> None:
     """Top-level entry the conversion queue calls when Masquerade Mode is on.
 
     Two cases:
@@ -1864,33 +2014,36 @@ def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
     src_ext = src_ext.lower()
     dst_ext = dst_ext.lower()
 
-    extracted = _try_extract(src, src_ext) if can_extract_from(src_ext) else None
+    extracted = (_try_extract(src, src_ext, password=password)
+                 if can_extract_from(src_ext) else None)
     if extracted is not None:
         payload, recovered_ext = extracted
         cancel.check()
         progress(0.55)
+        # The output file ALWAYS lands at the user-chosen dst path — never
+        # renamed to recovered_ext. With v3 encryption, the recovered_ext
+        # from a wrong-password decrypt is garbage that would otherwise
+        # leak the password-correctness via filename extension. Honoring
+        # dst_ext keeps the no-oracle invariant: wrong password produces
+        # a file at the user's chosen extension whose contents simply
+        # don't open in the target app.
         if dst_ext == recovered_ext or not can_embed_into(dst_ext):
-            if dst.suffix.lower() != recovered_ext:
-                dst = dst.with_suffix(recovered_ext)
             dst.write_bytes(payload)
             progress(1.0)
             return
         _embed_to(dst, payload, recovered_ext, dst_ext, cancel,
-                  cross_category=cross_category)
+                  cross_category=cross_category, password=password)
         progress(1.0)
         return
 
     # Decide streamed vs whole-file path based on source size.
-    # .py is always routed through the path-based variant (regardless of
-    # size) so the embedded reconstruction script preserves the original
-    # filename instead of a "payload.<ext>" placeholder.
     src_size = src.stat().st_size
     threshold = streaming_threshold(dst_ext)
     if dst_ext == ".py" or (src_size >= threshold and dst_ext in (".png", ".bmp")):
         cancel.check()
         progress(0.1)
         _embed_streamed_to(dst, src, src_ext, dst_ext, cancel, progress,
-                           cross_category=cross_category)
+                           cross_category=cross_category, password=password)
         progress(1.0)
         return
 
@@ -1898,5 +2051,5 @@ def convert(src: Path, dst: Path, src_ext: str, dst_ext: str,
     cancel.check()
     progress(0.3)
     _embed_to(dst, src_bytes, src_ext, dst_ext, cancel,
-              cross_category=cross_category)
+              cross_category=cross_category, password=password)
     progress(1.0)

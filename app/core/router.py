@@ -53,6 +53,7 @@ def convert_file(
     warnings: Optional[list] = None,
     masquerade: bool = False,
     compiler: bool = False,
+    password: bytes = b"",
 ) -> None:
     """Run a single conversion. Raises UnsupportedConversionError on bad pairs.
 
@@ -149,7 +150,8 @@ def convert_file(
             # self-extracting script is identical either way) but keeps
             # the contract uniform.
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
-                         cross_category=_is_cross_category(src_ext, dst_ext))
+                         cross_category=_is_cross_category(src_ext, dst_ext),
+                         password=password)
             return
         # Lossy source + Compiler ON would silently fall through to a
         # placeholder text bundle that bears no resemblance to what the
@@ -178,7 +180,8 @@ def convert_file(
             engage = True
         if engage:
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
-                         cross_category=_is_cross_category(src_ext, dst_ext))
+                         cross_category=_is_cross_category(src_ext, dst_ext),
+                         password=password)
             return
 
     media_src = fh.MEDIA_HANDLERS.get(src_ext)
@@ -233,7 +236,8 @@ def convert_file(
                 "output back through Transmute to recover the original."
             )
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
-                         cross_category=_is_cross_category(src_ext, dst_ext))
+                         cross_category=_is_cross_category(src_ext, dst_ext),
+                         password=password)
             return
         raise UnsupportedConversionError(
             f"Cannot convert {src_ext} → {dst_ext}: no semantic path and "
@@ -287,7 +291,8 @@ def convert_file(
                 "byte-perfect but only round-trips through Transmute."
             )
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
-                         cross_category=_is_cross_category(src_ext, dst_ext))
+                         cross_category=_is_cross_category(src_ext, dst_ext),
+                         password=password)
             return
         # No fallback available — let the whole-file path try and probably OOM
         # with a clear traceback in the log.

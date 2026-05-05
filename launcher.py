@@ -82,6 +82,9 @@ REQUIRED_PY = [
     # full-image-size fractal generation feasible (~0.3-0.6 sec for 1080²
     # vs. 30+ sec in pure Python).
     ("numpy", "numpy>=1.24"),
+    # AES-256-CTR for the encrypted Stone v3 envelope. Pure-stdlib has no
+    # AES; the cryptography package is the standard choice (~5 MB).
+    ("cryptography", "cryptography>=41.0"),
 ]
 
 
