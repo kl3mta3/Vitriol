@@ -2,7 +2,7 @@
 
 When a Stone-mode cross-category conversion outputs to an audio target
 (WAV, AIFF, FLAC), this module renders a music-like sample stream whose
-low 4 bits per sample carry the source payload (zlib-compressed envelope).
+low 4 bits per sample carry the source payload bytes.
 
 Output format constants:
   - 44.1 kHz sample rate
@@ -10,24 +10,30 @@ Output format constants:
   - Stereo (2 channels)
 
 Bit-packing:
-  - Each 16-bit sample reserves the LOW 4 BITS for payload, leaving 12 bits
-    of music headroom (~72 dB dynamic range — audibly indistinguishable
-    from CD audio for synthesized chord tones).
-  - Stereo frame holds 8 payload bits = 1 byte. So 1 byte of payload =
-    1 stereo frame. At 44.1 kHz, 1 second of music = 44,100 bytes payload.
+  - Each 16-bit sample reserves the LOW 4 BITS for payload. Music part
+    occupies the remaining range and is amplitude-bounded by MUSIC_HEADROOM.
+  - Stereo frame holds 8 payload bits = 1 byte. At 44.1 kHz, 1 second of
+    music carries 44,100 bytes of payload.
 
-Input transformation:
-  - Source bytes are zlib-compressed before bit-packing. Most non-audio
-    sources (text, code, PDFs) compress 30-70%; already-compressed sources
-    (PNGs, JPEGs, MP3s) gain little. Output size is roughly 1.5-2x source
-    for compressible inputs, 3-4x for incompressible ones.
+Two encoding paths share the bit-packer:
 
-Determinism: chord progression, key signature, and tempo are derived
-deterministically from the envelope header bytes (SHA-256 → bit fields).
-Same source always produces the same music.
+  encode_music_envelope (v3, NEW):
+    Caller supplies a self-describing v3 envelope (MAGIC_V3_AUDIO + length
+    + IV + salt + ciphertext). Encoder bit-packs the envelope verbatim
+    into PCM samples. No header wrapper, no compression — the envelope
+    is already self-describing AND incompressible (it's ciphertext).
+
+  encode_music_payload (uM01, LEGACY):
+    Caller supplies a UCMSv1 envelope. Encoder zlib-compresses, prepends
+    a 12-byte uM01 header (magic + sizes), bit-packs. Kept for backward
+    decoding of pre-v3 audio Stone files.
+
+Determinism: chord progression, key signature, tempo, and voicing are
+derived from SHA-256 of the bit-packed input bytes. Same source always
+produces the same music.
 
 This is a presentation feature, not steganography. The payload is
-recoverable through Transmute via the symmetric extract function.
+recoverable through Transmute via the symmetric decoder.
 """
 from __future__ import annotations
 import hashlib
@@ -43,8 +49,13 @@ BITS_PER_SAMPLE = 16
 BYTES_PER_SAMPLE = BITS_PER_SAMPLE // 8
 PAYLOAD_BITS_PER_SAMPLE = 4              # bottom 4 bits of each sample
 PAYLOAD_BITS_PER_FRAME = PAYLOAD_BITS_PER_SAMPLE * CHANNELS  # 8 bits = 1 byte
-MUSIC_BITS_PER_SAMPLE = BITS_PER_SAMPLE - PAYLOAD_BITS_PER_SAMPLE  # 12
-MUSIC_HEADROOM = 1 << (MUSIC_BITS_PER_SAMPLE - 1)  # signed-12-bit max = 2048
+# Music synthesis amplitude cap. Sized to land peaks at ≈ 50% of int16 full
+# scale (±16384), making outputs sound like normal music rather than the
+# 18 dB-quieter-than-CD dribble earlier versions produced. The bottom 4 bits
+# of the synthesis output get overwritten with payload nibbles regardless,
+# so the effective resolution is 12 bits — quantization noise sits at
+# ~-72 dBFS, inaudible against the chord backing.
+MUSIC_HEADROOM = 16384
 
 # Chord progressions, encoded by 4-bit index. Each entry is a list of scale
 # degrees (1-indexed Roman numerals translated to integers) describing chord
@@ -52,6 +63,7 @@ MUSIC_HEADROOM = 1 << (MUSIC_BITS_PER_SAMPLE - 1)  # signed-12-bit max = 2048
 # diatonic position (I, IV, V = major; ii, iii, vi = minor; vii = dim) for
 # major keys; mirrored for minor keys.
 PROGRESSIONS: List[List[int]] = [
+    # Original 16 — common pop / rock / jazz / blues progressions
     [1, 5, 6, 4],     # I-V-vi-IV   (most common pop)
     [2, 5, 1, 1],     # ii-V-I      (jazz standard, pad I)
     [1, 6, 4, 5],     # I-vi-IV-V   (50s doo-wop)
@@ -68,6 +80,23 @@ PROGRESSIONS: List[List[int]] = [
     [6, 7, 1, 1],     # vi-VII-I (rock cadence)
     [1, 5, 6, 3],     # I-V-vi-iii
     [4, 5, 1, 6],     # IV-V-I-vi
+    # Added 16 — modal interchange, jazz turnarounds, longer cycles
+    [1, 5, 4, 5],     # I-V-IV-V (sustained tonic)
+    [6, 2, 5, 1],     # vi-ii-V-I (jazz turnaround)
+    [1, 6, 2, 5],     # I-vi-ii-V (rhythm changes)
+    [4, 4, 1, 1],     # IV-IV-I-I (plagal feel)
+    [3, 6, 2, 5],     # iii-vi-ii-V (descending circle)
+    [1, 4, 7, 3],     # I-IV-VII-iii (modal)
+    [6, 3, 4, 1],     # vi-iii-IV-I
+    [2, 1, 4, 5],     # ii-I-IV-V
+    [1, 3, 6, 4],     # I-iii-vi-IV
+    [5, 4, 1, 6],     # V-IV-I-vi
+    [1, 6, 7, 5],     # I-vi-VII-V
+    [4, 6, 1, 5],     # IV-vi-I-V
+    [3, 4, 5, 6],     # iii-IV-V-vi
+    [1, 5, 6, 7],     # I-V-vi-VII
+    [6, 4, 5, 1],     # vi-IV-V-I (epic cadence)
+    [2, 5, 6, 4],     # ii-V-vi-IV
 ]
 
 # Major-scale intervals in semitones from the tonic.
@@ -82,19 +111,27 @@ MINOR_QUALITY = ["m", "d", "T", "m", "m", "T", "T"]
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def _seed_params(envelope: bytes) -> Tuple[int, float, int]:
+def _seed_params(envelope: bytes) -> Tuple[int, float, int, int]:
     """Hash the envelope bytes (or any deterministic seed material) into
-    music parameters.
+    music parameters. The tempo is then snapped so that
+    `samples_per_beat = round(SAMPLE_RATE * 60 / tempo_bpm)` is exact —
+    this keeps the percussion grid locked to the chord grid for the
+    entire output, no drift over time.
+
       key_index   : 0..23  — 0..11 = major C..B, 12..23 = minor c..b
-      tempo_bpm   : 60..120
-      progression : 0..15  — index into PROGRESSIONS
+      tempo_bpm   : 60..160, snapped to a beat-aligned tempo
+      progression : 0..len(PROGRESSIONS)-1
+      voicing     : 0=root, 1=first inversion, 2=second inversion
     """
     h = hashlib.sha256(envelope).digest()
     key_index = h[0] % 24
     tempo_byte = h[1]
-    tempo_bpm = 60.0 + (tempo_byte / 255.0) * 60.0
+    tempo_raw = 60.0 + (tempo_byte / 255.0) * 100.0    # 60..160 BPM
+    samples_per_beat = max(1, round(SAMPLE_RATE * 60.0 / tempo_raw))
+    tempo_bpm = SAMPLE_RATE * 60.0 / samples_per_beat
     progression = h[2] % len(PROGRESSIONS)
-    return key_index, tempo_bpm, progression
+    voicing = h[3] % 3
+    return key_index, tempo_bpm, progression, voicing
 
 
 def _midi_to_hz(midi_note: int) -> float:
@@ -102,11 +139,17 @@ def _midi_to_hz(midi_note: int) -> float:
     return 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
 
 
-def _build_chord(root_midi: int, quality: str) -> List[int]:
+def _build_chord(root_midi: int, quality: str, voicing: int = 0) -> List[int]:
     """Return MIDI notes for a triad rooted at root_midi.
-    quality: 'T' major (0,4,7), 'm' minor (0,3,7), 'd' diminished (0,3,6)."""
+    quality: 'T' major (0,4,7), 'm' minor (0,3,7), 'd' diminished (0,3,6).
+    voicing: 0=root position, 1=first inversion, 2=second inversion."""
     intervals = {"T": (0, 4, 7), "m": (0, 3, 7), "d": (0, 3, 6)}[quality]
-    return [root_midi + i for i in intervals]
+    notes = [root_midi + i for i in intervals]
+    if voicing == 1:
+        return [notes[1], notes[2], notes[0] + 12]
+    if voicing == 2:
+        return [notes[2], notes[0] + 12, notes[1] + 12]
+    return notes
 
 
 def _frames_for_bytes(n_bytes: int) -> int:
@@ -115,11 +158,54 @@ def _frames_for_bytes(n_bytes: int) -> int:
     return n_bytes  # 1 byte per stereo frame
 
 
+def _synth_kick(samples_per_beat: int) -> List[int]:
+    """Bass-drum-like waveform. Sine sweep 150 Hz → 50 Hz over an
+    exponentially-decaying envelope (~80 ms). Caps at half MUSIC_HEADROOM
+    so it sums into the chord backing without clipping. Length is bounded
+    by samples_per_beat so a single hit can't bleed into the next beat."""
+    duration = min(int(SAMPLE_RATE * 0.08), max(1, samples_per_beat - 1))
+    if duration < 2:
+        return []
+    f0 = 150.0
+    f1 = 50.0
+    amp = MUSIC_HEADROOM // 3
+    out = [0] * duration
+    phase = 0.0
+    for i in range(duration):
+        # Exponential frequency sweep — characteristic kick "thump".
+        freq = f0 * (f1 / f0) ** (i / duration)
+        phase += 2.0 * math.pi * freq / SAMPLE_RATE
+        env = math.exp(-i / (duration * 0.3))
+        out[i] = int(amp * env * math.sin(phase))
+    return out
+
+
+def _synth_click(samples_per_beat: int) -> List[int]:
+    """High click / hi-hat tick. Brief 3.5 kHz tone burst with fast
+    exponential decay (~15 ms). Quieter than the kick so the rhythm
+    section doesn't dominate the chord backing."""
+    duration = min(int(SAMPLE_RATE * 0.015), max(1, samples_per_beat - 1))
+    if duration < 2:
+        return []
+    freq = 3500.0
+    amp = MUSIC_HEADROOM // 6
+    out = [0] * duration
+    for i in range(duration):
+        env = math.exp(-i / (duration * 0.25))
+        out[i] = int(amp * env * math.sin(2.0 * math.pi * freq * i / SAMPLE_RATE))
+    return out
+
+
 def _generate_music_samples(n_frames: int, key_index: int,
-                             tempo_bpm: float, progression_idx: int
+                             tempo_bpm: float, progression_idx: int,
+                             voicing: int = 0,
                              ) -> Iterator[Tuple[int, int]]:
-    """Yield exactly n_frames (left, right) sample tuples in the 12-bit
-    music range (signed; payload bits will be packed in by the caller)."""
+    """Yield exactly n_frames (left, right) sample tuples in the music
+    amplitude range (signed; payload bits will be packed in by the caller).
+
+    The tempo is assumed pre-snapped by `_seed_params` so that
+    `samples_per_beat` is an exact integer — this keeps percussion locked
+    to the chord grid for the duration of the output."""
     is_minor = key_index >= 12
     tonic_offset = key_index % 12  # 0=C, 1=C#, ..., 11=B
     intervals = MINOR_INTERVALS if is_minor else MAJOR_INTERVALS
@@ -130,9 +216,16 @@ def _generate_music_samples(n_frames: int, key_index: int,
     base_midi = 60 + tonic_offset
 
     # Beats per second; one chord per 2 beats by default.
-    beats_per_sec = tempo_bpm / 60.0
-    samples_per_beat = SAMPLE_RATE / beats_per_sec
-    samples_per_chord = int(samples_per_beat * 2.0)
+    samples_per_beat = max(1, round(SAMPLE_RATE * 60.0 / tempo_bpm))
+    samples_per_chord = samples_per_beat * 2
+
+    # Pre-compute percussion: kick on beat 1, click on beat 3 of every
+    # 4-beat measure. Grid is sample-exact because samples_per_beat is
+    # integer (see _seed_params snap).
+    kick = _synth_kick(samples_per_beat)
+    click = _synth_click(samples_per_beat)
+    measure_samples = samples_per_beat * 4
+    click_offset = samples_per_beat * 2  # beat 3 (0-indexed)
 
     # Attack/release envelope (50 ms each).
     env_samples = int(SAMPLE_RATE * 0.05)
@@ -152,7 +245,7 @@ def _generate_music_samples(n_frames: int, key_index: int,
         degree = progression[chord_index % len(progression)]
         scale_idx = (degree - 1) % 7
         chord_root_midi = base_midi + intervals[scale_idx]
-        notes = _build_chord(chord_root_midi, qualities[scale_idx])
+        notes = _build_chord(chord_root_midi, qualities[scale_idx], voicing)
         cur_chord_freqs = [_midi_to_hz(n) for n in notes]
 
     _refresh_chord()
@@ -179,26 +272,34 @@ def _generate_music_samples(n_frames: int, key_index: int,
         # Vibrato modulator.
         vib = 1.0 + vib_depth * math.sin(two_pi_over_sr * vib_freq * f)
 
-        # Sum voices, scaled to fit the 12-bit headroom with margin.
-        # Divide by len(voices)*2 to leave room for envelope/vibrato peaks.
+        # Sum voices. Per-voice amplitude is sized so an in-phase 3-voice
+        # constructive peak just reaches MUSIC_HEADROOM — the post-summation
+        # clamp catches the rare overshoot. Real chord material rarely
+        # phase-aligns, so typical RMS sits well below the cap.
         n_voices = len(cur_chord_freqs)
-        amp_per_voice = MUSIC_HEADROOM // (n_voices * 2)
+        amp_per_voice = MUSIC_HEADROOM // max(1, n_voices)
         sample_value = 0
         for i, base_freq in enumerate(cur_chord_freqs):
             freq = base_freq * vib
             phases[i] += two_pi_over_sr * freq
             sample_value += int(amp_per_voice * env * math.sin(phases[i]))
 
-        # Soft saturation guard so payload bits aren't clipped.
+        # Percussion overlay (mono, summed into both channels). Locked to
+        # the beat grid: kick on beat 1, click on beat 3 of every measure.
+        f_in_measure = f % measure_samples
+        if f_in_measure < len(kick):
+            sample_value += kick[f_in_measure]
+        delta = f_in_measure - click_offset
+        if 0 <= delta < len(click):
+            sample_value += click[delta]
+
+        # Soft saturation guard so payload bits aren't clipped at the top
+        # of the int16 range. Hits ±MUSIC_HEADROOM only on rare summed peaks.
         if sample_value > MUSIC_HEADROOM - 1:
             sample_value = MUSIC_HEADROOM - 1
         elif sample_value < -MUSIC_HEADROOM:
             sample_value = -MUSIC_HEADROOM
 
-        # Stereo: light per-channel detune for spaciousness.
-        # Low channel = sample_value, high channel = slightly delayed (frame-1).
-        # For simplicity we just return identical channels here; spatializer
-        # is out of scope.
         yield sample_value, sample_value
         chord_sample_pos += 1
 
@@ -256,30 +357,28 @@ def _samples_to_pcm_be16(samples: Iterator[Tuple[int, int]]) -> Iterator[bytes]:
 
 
 def encode_music_payload(envelope: bytes) -> Tuple[bytes, int]:
-    """Compress the envelope, generate music samples, embed payload bits,
-    and return (raw_pcm_le16_bytes, n_frames). The PCM is ready to be
-    wrapped in WAV/AIFF/FLAC containers.
+    """LEGACY (uM01) audio Stone path. Compresses the envelope with zlib,
+    prepends a 12-byte uM01 header, and bit-packs into LE PCM samples.
 
-    Returns a single bytes object — for typical Stone payloads (under
-    ~50 MB after compression) this fits easily in memory. Streaming output
-    can be added later if Stone starts being used for huge sources.
+    Kept for two reasons:
+      1. Same-category audio targets that flow through the music encoder
+         (currently none — same-category WAV/AIFF use _wav_embed not
+         _wav_embed_music — but harmless to keep available).
+      2. Decoder backward-compatibility with audio Stone files generated
+         before MAGIC_V3_AUDIO shipped (decode_music_payload_le still
+         expects the uM01 header).
+
+    NEW v3 audio Stone files use `encode_music_envelope` instead — no
+    zlib (ciphertext is already incompressible) and the v3 envelope
+    carries its own self-describing header.
     """
     compressed = zlib.compress(envelope, level=6)
-    # Header bytes to identify the music payload on extract. Embed:
-    #   4 bytes magic "uM01"
-    #   4 bytes uncompressed envelope size (BE uint32)
-    #   4 bytes compressed payload size (BE uint32)
-    #   payload bytes (zlib-compressed envelope)
     header = b"uM01" + struct.pack(">II", len(envelope), len(compressed))
     full_payload = header + compressed
-
-    # Seed for music params is derived from the FULL payload bytes so the
-    # music is deterministic from the input.
-    key_index, tempo_bpm, progression = _seed_params(full_payload)
-
+    key_index, tempo_bpm, progression, voicing = _seed_params(full_payload)
     n_frames = _frames_for_bytes(len(full_payload))
-
-    samples = _generate_music_samples(n_frames, key_index, tempo_bpm, progression)
+    samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
+                                       progression, voicing)
     embedded = _pack_payload_into_samples(samples, full_payload)
     out = bytearray()
     for chunk in _samples_to_pcm_le16(embedded):
@@ -288,14 +387,44 @@ def encode_music_payload(envelope: bytes) -> Tuple[bytes, int]:
 
 
 def encode_music_payload_be(envelope: bytes) -> Tuple[bytes, int]:
-    """Same as encode_music_payload but emits big-endian PCM (for AIFF)."""
+    """LEGACY (uM01) BE-PCM variant for AIFF. See encode_music_payload."""
     compressed = zlib.compress(envelope, level=6)
     header = b"uM01" + struct.pack(">II", len(envelope), len(compressed))
     full_payload = header + compressed
-    key_index, tempo_bpm, progression = _seed_params(full_payload)
+    key_index, tempo_bpm, progression, voicing = _seed_params(full_payload)
     n_frames = _frames_for_bytes(len(full_payload))
-    samples = _generate_music_samples(n_frames, key_index, tempo_bpm, progression)
+    samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
+                                       progression, voicing)
     embedded = _pack_payload_into_samples(samples, full_payload)
+    out = bytearray()
+    for chunk in _samples_to_pcm_be16(embedded):
+        out.extend(chunk)
+    return bytes(out), n_frames
+
+
+def encode_music_envelope(envelope: bytes) -> Tuple[bytes, int]:
+    """NEW v3 audio Stone path. The envelope is a self-describing v3
+    envelope built by `masquerade._v3_audio_envelope` — magic + length +
+    IV + salt + ciphertext. Bit-packs verbatim into LE PCM samples (no
+    zlib wrapper, no extra header)."""
+    key_index, tempo_bpm, progression, voicing = _seed_params(envelope)
+    n_frames = _frames_for_bytes(len(envelope))
+    samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
+                                       progression, voicing)
+    embedded = _pack_payload_into_samples(samples, envelope)
+    out = bytearray()
+    for chunk in _samples_to_pcm_le16(embedded):
+        out.extend(chunk)
+    return bytes(out), n_frames
+
+
+def encode_music_envelope_be(envelope: bytes) -> Tuple[bytes, int]:
+    """NEW v3 BE-PCM variant for AIFF. See encode_music_envelope."""
+    key_index, tempo_bpm, progression, voicing = _seed_params(envelope)
+    n_frames = _frames_for_bytes(len(envelope))
+    samples = _generate_music_samples(n_frames, key_index, tempo_bpm,
+                                       progression, voicing)
+    embedded = _pack_payload_into_samples(samples, envelope)
     out = bytearray()
     for chunk in _samples_to_pcm_be16(embedded):
         out.extend(chunk)
@@ -321,6 +450,34 @@ def decode_music_payload_be(pcm_be16_bytes: bytes) -> bytes:
 
 def _decode_music_payload(pcm_bytes: bytes, _byte_order: str) -> bytes:
     return _decode_music_payload_endian(pcm_bytes, "<")
+
+
+def decode_music_bytes_le(pcm_bytes: bytes, n_bytes: int) -> bytes:
+    """Bit-unpack the first n_bytes of payload from a LE-PCM stream. No
+    header parsing, no zlib — used by the v3 audio decoder which has its
+    own self-describing envelope sitting at byte 0 of the payload stream."""
+    return _decode_music_bytes_endian(pcm_bytes, "<", n_bytes)
+
+
+def decode_music_bytes_be(pcm_bytes: bytes, n_bytes: int) -> bytes:
+    """BE-PCM variant for AIFF. See decode_music_bytes_le."""
+    return _decode_music_bytes_endian(pcm_bytes, ">", n_bytes)
+
+
+def _decode_music_bytes_endian(pcm_bytes: bytes, byte_order: str,
+                                n_bytes: int) -> bytes:
+    frame_size = BYTES_PER_SAMPLE * CHANNELS
+    n_frames_avail = len(pcm_bytes) // frame_size
+    n = max(0, min(n_bytes, n_frames_avail))
+    if n == 0:
+        return b""
+    out = bytearray(n)
+    fmt = byte_order + "hh"
+    for i in range(n):
+        off = i * frame_size
+        left, right = struct.unpack(fmt, pcm_bytes[off:off + frame_size])
+        out[i] = ((right & 0x0F) << 4) | (left & 0x0F)
+    return bytes(out)
 
 
 def _decode_music_payload_endian(pcm_bytes: bytes, byte_order: str) -> bytes:

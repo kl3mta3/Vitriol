@@ -45,6 +45,8 @@ from ..core.config import CHUNK_SIZE, streaming_threshold
 MAGIC = b"UCMSv1\0"
 MAGIC_V2 = b"UCMSv2\0\0"  # 8 bytes — tiered-image-dimensions envelope (PNG/BMP)
 MAGIC_V3 = b"UCMSv3\0\0"  # 8 bytes — encrypted Mandelbrot envelope (PNG/BMP)
+MAGIC_V3_AUDIO = b"uM03\0\0\0\0"  # 8 bytes — encrypted music envelope (WAV/AIFF/FLAC)
+MAGIC_V3_3D = b"UC3Dv3\0\0"  # 8 bytes — encrypted 3D envelope (PLY/OBJ/GLB)
 
 # Read-write capable host extensions. Used by the registry + dropdown filter
 # when Philosopher's Stone (a.k.a. Masquerade) mode is on.
@@ -371,12 +373,15 @@ def _wav_embed(src_bytes: bytes, src_ext: str) -> bytes:
     return bytes(out)
 
 
-def _wav_embed_music(src_bytes: bytes, src_ext: str) -> bytes:
-    """Cross-category Stone audio target. Generate music samples with the
-    source bytes packed in the bottom 4 bits per sample."""
+def _wav_embed_music(src_bytes: bytes, src_ext: str,
+                      password: bytes = b"") -> bytes:
+    """Cross-category Stone audio target. Builds an encrypted v3 audio
+    envelope (AES-256-CTR + PBKDF2 under `password`) and bit-packs it into
+    music samples (low 4 bits/channel). Empty password → deterministic
+    default key shared by all Transmute installs of the same version."""
     from . import _music as _m
-    env = _build_envelope(src_bytes, src_ext)
-    pcm, n_frames = _m.encode_music_payload(env)
+    envelope = _v3_audio_envelope(src_bytes, src_ext, password)
+    pcm, n_frames = _m.encode_music_envelope(envelope)
     sample_rate = _m.SAMPLE_RATE
     num_channels = _m.CHANNELS
     bits_per_sample = _m.BITS_PER_SAMPLE
@@ -433,13 +438,13 @@ def _aiff_embed(src_bytes: bytes, src_ext: str) -> bytes:
     return b"FORM" + struct.pack(">I", len(body)) + body
 
 
-def _aiff_embed_music(src_bytes: bytes, src_ext: str) -> bytes:
-    """Cross-category AIFF: music samples (big-endian PCM) carry payload
-    in bottom 4 bits per channel. Same encoder as _wav_embed_music but
-    big-endian samples wrapped in IFF chunks."""
+def _aiff_embed_music(src_bytes: bytes, src_ext: str,
+                       password: bytes = b"") -> bytes:
+    """Cross-category AIFF: encrypted v3 audio envelope bit-packed into
+    big-endian PCM samples. Mirrors _wav_embed_music with BE encoding."""
     from . import _music as _m
-    env = _build_envelope(src_bytes, src_ext)
-    pcm, n_frames = _m.encode_music_payload_be(env)
+    envelope = _v3_audio_envelope(src_bytes, src_ext, password)
+    pcm, n_frames = _m.encode_music_envelope_be(envelope)
     sample_rate = _m.SAMPLE_RATE
     num_channels = _m.CHANNELS
     bits_per_sample = _m.BITS_PER_SAMPLE
@@ -456,8 +461,9 @@ def _aiff_embed_music(src_bytes: bytes, src_ext: str) -> bytes:
     return b"FORM" + struct.pack(">I", len(body)) + body
 
 
-def _aiff_extract(host: bytes) -> Tuple[bytes, str]:
-    """Dual-attempt AIFF extract: classic UCMSv1-in-SSND first, then music."""
+def _aiff_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
+    """Dual-attempt AIFF extract: classic UCMSv1-in-SSND first, then music
+    mode (uM01 legacy or v3 encrypted)."""
     if host[:4] != b"FORM" or host[8:12] != b"AIFF":
         raise ValueError("Not an AIFF file.")
     p = 12
@@ -488,8 +494,16 @@ def _aiff_extract(host: bytes) -> Tuple[bytes, str]:
         raise ValueError("AIFF: SSND has neither classic envelope nor "
                          "music-mode parameters (44.1 kHz / 16-bit / stereo).")
     from . import _music as _m
-    env = _m.decode_music_payload_be(ssnd_blob)
-    return _parse_envelope(env)
+    head = _m.decode_music_bytes_be(ssnd_blob, 16)
+    if head.startswith(b"uM01"):
+        env = _m.decode_music_payload_be(ssnd_blob)
+        return _parse_envelope(env)
+    if head.startswith(MAGIC_V3_AUDIO):
+        ciphertext_len = struct.unpack(">Q", head[8:16])[0]
+        total = V3_AUDIO_HEADER_SIZE + ciphertext_len
+        full_env = _m.decode_music_bytes_be(ssnd_blob, total)
+        return _parse_v3_audio_envelope(full_env, password)
+    raise ValueError("AIFF music mode: no recognized envelope magic.")
 
 
 def _aiff_extended_float(value: int) -> bytes:
@@ -561,10 +575,12 @@ def _flac_to_wav_via_ffmpeg(flac_path: Path, wav_path: Path) -> None:
         raise RuntimeError(f"FFmpeg FLAC->WAV failed (exit {rc})")
 
 
-def _flac_embed_music(src_bytes: bytes, src_ext: str, dst: Path) -> None:
-    """Cross-category FLAC: write music WAV to temp, re-encode via FFmpeg."""
+def _flac_embed_music(src_bytes: bytes, src_ext: str, dst: Path,
+                       password: bytes = b"") -> None:
+    """Cross-category FLAC: write encrypted v3 music WAV to temp, re-encode
+    via FFmpeg. FLAC is bit-exact, so payload bits survive losslessly."""
     import tempfile
-    wav_bytes = _wav_embed_music(src_bytes, src_ext)
+    wav_bytes = _wav_embed_music(src_bytes, src_ext, password=password)
     tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
     try:
         tmp_wav.write_bytes(wav_bytes)
@@ -588,33 +604,34 @@ def _flac_embed(src_bytes: bytes, src_ext: str, dst: Path) -> None:
         except OSError: pass
 
 
-def _flac_extract(src: Path) -> Tuple[bytes, str]:
-    """Decode the FLAC to WAV via FFmpeg, then dual-attempt _wav_extract.
+def _flac_extract(src: Path, password: bytes = b"") -> Tuple[bytes, str]:
+    """Decode the FLAC to WAV via FFmpeg, then route to _wav_extract.
     Note: takes a Path (not bytes) because FFmpeg needs a file. The
     matching _EXTRACT entry adapts via _flac_extract_from_bytes below."""
     import tempfile
     tmp_wav = Path(tempfile.mkstemp(suffix=".wav")[1])
     try:
         _flac_to_wav_via_ffmpeg(src, tmp_wav)
-        return _wav_extract(tmp_wav.read_bytes())
+        return _wav_extract(tmp_wav.read_bytes(), password=password)
     finally:
         try: tmp_wav.unlink()
         except OSError: pass
 
 
-def _flac_extract_from_bytes(host: bytes) -> Tuple[bytes, str]:
+def _flac_extract_from_bytes(host: bytes,
+                              password: bytes = b"") -> Tuple[bytes, str]:
     """Bytes-API wrapper for _EXTRACT dispatch."""
     import tempfile
     tmp_flac = Path(tempfile.mkstemp(suffix=".flac")[1])
     try:
         tmp_flac.write_bytes(host)
-        return _flac_extract(tmp_flac)
+        return _flac_extract(tmp_flac, password=password)
     finally:
         try: tmp_flac.unlink()
         except OSError: pass
 
 
-def _wav_extract(host: bytes) -> Tuple[bytes, str]:
+def _wav_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
     # Skip RIFF header + walk chunks looking for 'data'
     if host[:4] != b"RIFF" or host[8:12] != b"WAVE":
         raise ValueError("Not a WAV file.")
@@ -646,9 +663,20 @@ def _wav_extract(host: bytes) -> Tuple[bytes, str]:
         raise ValueError("WAV: data chunk has neither classic envelope nor "
                          "music-mode parameters (44.1 kHz / 16-bit / stereo).")
     from . import _music as _m
-    env = _m.decode_music_payload_le(data_blob)
-    return _parse_envelope(env)
-    raise ValueError("WAV has no data chunk.")
+    # Detect format by reading the first 16 bit-packed bytes (cheap) and
+    # checking the magic. Two formats coexist:
+    #   uM01  — legacy zlib+UCMSv1 audio Stone (pre-v3)
+    #   uM03* — encrypted v3 audio Stone (MAGIC_V3_AUDIO)
+    head = _m.decode_music_bytes_le(data_blob, 16)
+    if head.startswith(b"uM01"):
+        env = _m.decode_music_payload_le(data_blob)
+        return _parse_envelope(env)
+    if head.startswith(MAGIC_V3_AUDIO):
+        ciphertext_len = struct.unpack(">Q", head[8:16])[0]
+        total = V3_AUDIO_HEADER_SIZE + ciphertext_len
+        full_env = _m.decode_music_bytes_le(data_blob, total)
+        return _parse_v3_audio_envelope(full_env, password)
+    raise ValueError("WAV music mode: no recognized envelope magic.")
 
 
 # ---------------------------------------------------------------------------
@@ -1333,6 +1361,112 @@ def _parse_v3_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
     return payload, src_ext
 
 
+def _parse_v3_inner_clamped(inner: bytes) -> "Tuple[bytes, str]":
+    """Common graceful-clamp parser for v3 inner plaintext (audio + 3D).
+
+    Same no-oracle invariant as image: wrong password produces garbage
+    bytes; we clamp implausible values rather than raising so the caller
+    always gets *something* and never learns 'wrong password' from an
+    exception."""
+    if len(inner) < 1:
+        return b"", ".bin"
+    ext_len = inner[0]
+    if ext_len > 64 or 1 + ext_len + 8 > len(inner):
+        return inner[1:], ".bin"
+    src_ext = inner[1:1 + ext_len].decode("utf-8", errors="replace")
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext if src_ext else ".bin"
+    p = 1 + ext_len
+    payload_len = struct.unpack(">Q", inner[p:p + 8])[0]
+    p += 8
+    payload = inner[p:p + payload_len]
+    if len(payload) != payload_len:
+        return payload, src_ext
+    return payload, src_ext
+
+
+def _v3_audio_envelope(payload: bytes, src_ext: str, password: bytes) -> bytes:
+    """Build encrypted audio envelope:
+        MAGIC_V3_AUDIO (8) | ciphertext_len (8 BE) | IV (16) | salt (4) | ciphertext
+
+    Same crypto primitives as the image side (AES-256-CTR, deterministic
+    SIV-style IV, PBKDF2-derived key). The clear-text length lets the
+    decoder slice the exact ciphertext span out of the bit-packed audio
+    stream without scanning past the meaningful content. No image
+    dimensions — audio carries no width/height.
+    """
+    from . import _stone_crypto as _sc
+    inner = _build_inner_plaintext(payload, src_ext)
+    iv, ciphertext = _sc.encrypt(inner, password)
+    salt_field = b"\x00\x00\x00\x00"   # reserved for future per-file salting
+    return (MAGIC_V3_AUDIO
+            + struct.pack(">Q", len(ciphertext))
+            + iv + salt_field
+            + ciphertext)
+
+
+V3_AUDIO_HEADER_SIZE = len(MAGIC_V3_AUDIO) + 8 + 16 + 4   # = 36
+
+
+def _parse_v3_audio_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
+    """Parse encrypted audio envelope. Wrong password silently produces
+    garbage (no oracle). Truncation is a real error (non-content-related)
+    and may raise."""
+    from . import _stone_crypto as _sc
+    if len(blob) < V3_AUDIO_HEADER_SIZE:
+        raise ValueError("v3 audio envelope: too short.")
+    if not blob.startswith(MAGIC_V3_AUDIO):
+        raise ValueError("v3 audio envelope: magic not found.")
+    p = len(MAGIC_V3_AUDIO)
+    ciphertext_len = struct.unpack(">Q", blob[p:p + 8])[0]; p += 8
+    iv = blob[p:p + 16]; p += 16
+    _salt = blob[p:p + 4]; p += 4
+    ciphertext = blob[p:p + ciphertext_len]
+    if len(ciphertext) != ciphertext_len:
+        raise ValueError(
+            f"v3 audio envelope: truncated (need {ciphertext_len}, got {len(ciphertext)}).")
+    inner = _sc.decrypt(iv, ciphertext, password)
+    return _parse_v3_inner_clamped(inner)
+
+
+def _v3_3d_envelope(payload: bytes, src_ext: str, password: bytes) -> bytes:
+    """Build encrypted 3D envelope:
+        MAGIC_V3_3D (8) | ciphertext_len (8 BE) | IV (16) | salt (4) | ciphertext
+
+    Used by PLY/OBJ/GLB cross-category embed. PLY/OBJ wrap this in base64
+    inside comment lines; GLB stores it verbatim in the ucMs chunk."""
+    from . import _stone_crypto as _sc
+    inner = _build_inner_plaintext(payload, src_ext)
+    iv, ciphertext = _sc.encrypt(inner, password)
+    salt_field = b"\x00\x00\x00\x00"
+    return (MAGIC_V3_3D
+            + struct.pack(">Q", len(ciphertext))
+            + iv + salt_field
+            + ciphertext)
+
+
+V3_3D_HEADER_SIZE = len(MAGIC_V3_3D) + 8 + 16 + 4   # = 36
+
+
+def _parse_v3_3d_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
+    """Parse encrypted 3D envelope. Wrong password → silent garbage."""
+    from . import _stone_crypto as _sc
+    if len(blob) < V3_3D_HEADER_SIZE:
+        raise ValueError("v3 3D envelope: too short.")
+    if not blob.startswith(MAGIC_V3_3D):
+        raise ValueError("v3 3D envelope: magic not found.")
+    p = len(MAGIC_V3_3D)
+    ciphertext_len = struct.unpack(">Q", blob[p:p + 8])[0]; p += 8
+    iv = blob[p:p + 16]; p += 16
+    _salt = blob[p:p + 4]; p += 4
+    ciphertext = blob[p:p + ciphertext_len]
+    if len(ciphertext) != ciphertext_len:
+        raise ValueError(
+            f"v3 3D envelope: truncated (need {ciphertext_len}, got {len(ciphertext)}).")
+    inner = _sc.decrypt(iv, ciphertext, password)
+    return _parse_v3_inner_clamped(inner)
+
+
 def _build_mandelbrot_image(src_bytes: bytes, src_ext: str,
                              password: bytes = b"",
                              cancel: Optional["CancellationToken"] = None
@@ -1667,15 +1801,23 @@ _PLY_COMMENT_TAG = "uc"   # short prefix on each comment line so extraction can
                           # ignore unrelated comments a user might paste in.
 
 
-def _ply_embed(src_bytes: bytes, src_ext: str) -> bytes:
-    env = _build_envelope(src_bytes, src_ext)
+def _ply_embed(src_bytes: bytes, src_ext: str,
+                cross_category: bool = False,
+                password: bytes = b"") -> bytes:
+    """Build a PLY host. Same-type (model→model) keeps the plaintext
+    UCMSv1 envelope. Cross-type (e.g. .png→.ply) wraps the v3 encrypted
+    envelope so the source extension is hidden in the comment bytes."""
+    if cross_category:
+        env = _v3_3d_envelope(src_bytes, src_ext, password)
+    else:
+        env = _build_envelope(src_bytes, src_ext)
     body = base64.b64encode(env).decode("ascii")
     chunks = [body[i:i + 72] for i in range(0, len(body), 72)]
     lines = [f"comment {_PLY_COMMENT_TAG} {c}\n" for c in chunks]
     return (_PLY_HEADER + "".join(lines) + _PLY_FOOTER).encode("utf-8")
 
 
-def _ply_extract(host: bytes) -> Tuple[bytes, str]:
+def _ply_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
     text = host.decode("utf-8", errors="replace")
     pieces: list[str] = []
     in_header = False
@@ -1699,6 +1841,8 @@ def _ply_extract(host: bytes) -> Tuple[bytes, str]:
         env = base64.b64decode(body, validate=True)
     except Exception as e:
         raise ValueError(f"PLY host: malformed base64 envelope: {e}")
+    if env.startswith(MAGIC_V3_3D):
+        return _parse_v3_3d_envelope(env, password)
     return _parse_envelope(env)
 
 
@@ -1712,15 +1856,21 @@ def _ply_extract(host: bytes) -> Tuple[bytes, str]:
 _OBJ_COMMENT_TAG = "uc"
 
 
-def _obj_embed(src_bytes: bytes, src_ext: str) -> bytes:
-    env = _build_envelope(src_bytes, src_ext)
+def _obj_embed(src_bytes: bytes, src_ext: str,
+                cross_category: bool = False,
+                password: bytes = b"") -> bytes:
+    """Build an OBJ host. See _ply_embed for the same-type/cross-type rule."""
+    if cross_category:
+        env = _v3_3d_envelope(src_bytes, src_ext, password)
+    else:
+        env = _build_envelope(src_bytes, src_ext)
     body = base64.b64encode(env).decode("ascii")
     chunks = [body[i:i + 72] for i in range(0, len(body), 72)]
     lines = [f"# {_OBJ_COMMENT_TAG} {c}\n" for c in chunks]
     return ("".join(lines) + "v 0 0 0\n").encode("utf-8")
 
 
-def _obj_extract(host: bytes) -> Tuple[bytes, str]:
+def _obj_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
     text = host.decode("utf-8", errors="replace")
     pieces: list[str] = []
     for line in text.splitlines():
@@ -1736,6 +1886,8 @@ def _obj_extract(host: bytes) -> Tuple[bytes, str]:
         env = base64.b64decode(body, validate=True)
     except Exception as e:
         raise ValueError(f"OBJ host: malformed base64 envelope: {e}")
+    if env.startswith(MAGIC_V3_3D):
+        return _parse_v3_3d_envelope(env, password)
     return _parse_envelope(env)
 
 
@@ -1778,8 +1930,14 @@ def _pad4(n: int) -> int:
     return (-n) & 3
 
 
-def _glb_embed(src_bytes: bytes, src_ext: str) -> bytes:
-    env = _build_envelope(src_bytes, src_ext)
+def _glb_embed(src_bytes: bytes, src_ext: str,
+                cross_category: bool = False,
+                password: bytes = b"") -> bytes:
+    """Build a GLB host. See _ply_embed for the same-type/cross-type rule."""
+    if cross_category:
+        env = _v3_3d_envelope(src_bytes, src_ext, password)
+    else:
+        env = _build_envelope(src_bytes, src_ext)
 
     json_pad = b" " * _pad4(len(_GLB_MIN_JSON))
     json_chunk_data = _GLB_MIN_JSON + json_pad
@@ -1799,7 +1957,7 @@ def _glb_embed(src_bytes: bytes, src_ext: str) -> bytes:
     return header + body
 
 
-def _glb_extract(host: bytes) -> Tuple[bytes, str]:
+def _glb_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
     if len(host) < 12 or host[:4] != _GLB_MAGIC:
         raise ValueError("GLB host: missing glTF magic.")
     version, total_len = struct.unpack("<II", host[4:12])
@@ -1812,8 +1970,10 @@ def _glb_extract(host: bytes) -> Tuple[bytes, str]:
         data = host[p + 8:p + 8 + chunk_len]
         p += 8 + chunk_len
         if tag == _GLB_CHUNK_UCMS:
-            # Strip trailing zero padding before parsing
-            return _parse_envelope(data.rstrip(b"\x00"))
+            env = data.rstrip(b"\x00")
+            if env.startswith(MAGIC_V3_3D):
+                return _parse_v3_3d_envelope(env, password)
+            return _parse_envelope(env)
     raise ValueError("GLB host: no Stone envelope chunk (ucMs) found.")
 
 
@@ -1852,9 +2012,10 @@ def _try_extract(src: Path, src_ext: str,
     """Returns (payload, recovered_ext) if src is a Masquerade host with a
     valid envelope; None if no envelope or unsupported source ext.
 
-    `password` is forwarded to PNG/BMP extraction for v3 envelope decryption.
-    Other host types (TXT, MKV, PY, PLY, OBJ, GLB, AIFF, FLAC) currently
-    use the unencrypted v1/v2 envelope and ignore the password.
+    `password` is forwarded to all extractors that use encrypted v3
+    envelopes (image PNG/BMP, audio WAV/AIFF/FLAC, 3D PLY/OBJ/GLB).
+    TXT, MKV, PY hosts currently use the unencrypted v1/v2 envelope and
+    ignore the password.
     """
     src_ext = src_ext.lower()
     try:
@@ -1896,6 +2057,13 @@ def _try_extract(src: Path, src_ext: str,
                     except OSError: pass
             except (ValueError, RuntimeError):
                 return _bmp_extract(src.read_bytes())
+        # Audio + 3D extractors take a password for v3 decryption.
+        if src_ext in (".wav", ".aiff"):
+            return _EXTRACT[src_ext](src.read_bytes(), password=password)
+        if src_ext == ".flac":
+            return _flac_extract_from_bytes(src.read_bytes(), password=password)
+        if src_ext in (".ply", ".obj", ".glb"):
+            return _EXTRACT[src_ext](src.read_bytes(), password=password)
         if src_ext in _EXTRACT:
             return _EXTRACT[src_ext](src.read_bytes())
     except ValueError:
@@ -1927,20 +2095,20 @@ def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
                                   mandelbrot=cross_category, password=password)
         return
     if dst_ext == ".wav" and cross_category:
-        # Cross-category audio target: render music samples with payload
-        # in low 4 bits per channel. Same-category WAV (audio source)
-        # falls through to the classic _wav_embed via _EMBED dispatch.
-        dst.write_bytes(_wav_embed_music(payload, src_ext))
+        # Cross-category audio target: encrypted v3 envelope bit-packed
+        # into music samples. Same-category WAV (audio→audio) falls
+        # through to the plaintext _wav_embed via _EMBED dispatch.
+        dst.write_bytes(_wav_embed_music(payload, src_ext, password=password))
         return
     if dst_ext == ".aiff" and cross_category:
-        dst.write_bytes(_aiff_embed_music(payload, src_ext))
+        dst.write_bytes(_aiff_embed_music(payload, src_ext, password=password))
         return
     if dst_ext == ".flac":
         # FLAC always goes through FFmpeg. Cross-category uses the music
-        # encoder; same-category uses the classic 8 kHz mono envelope WAV
-        # (re-encoded to FLAC for storage). Both round-trip losslessly.
+        # encoder (encrypted v3); same-category uses the classic 8 kHz
+        # mono plaintext envelope WAV. Both round-trip losslessly.
         if cross_category:
-            _flac_embed_music(payload, src_ext, dst)
+            _flac_embed_music(payload, src_ext, dst, password=password)
         else:
             _flac_embed(payload, src_ext, dst)
         return
@@ -1958,6 +2126,13 @@ def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
         finally:
             try: tmp.unlink()
             except OSError: pass
+        return
+    if dst_ext in (".ply", ".obj", ".glb"):
+        # 3D hosts: cross-type wraps an encrypted v3 envelope (hides source
+        # ext in the comment/chunk bytes); same-type stays plaintext UCMSv1.
+        dst.write_bytes(_EMBED[dst_ext](payload, src_ext,
+                                         cross_category=cross_category,
+                                         password=password))
         return
     if dst_ext not in _EMBED:
         raise RuntimeError(f"Masquerade target {dst_ext} is not supported.")

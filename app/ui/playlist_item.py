@@ -143,7 +143,8 @@ class PlaylistItemWidget(QWidget):
         self.stone_lock_btn.setToolTip(
             "Set Stone password (files round-trip with this password)")
         self.stone_lock_btn.clicked.connect(self._on_stone_lock_clicked)
-        self.stone_lock_btn.setVisible(self._masquerade)
+        # Initial visibility: gated below in _refresh_stone_lock_visibility
+        # once dst_combo is populated (visibility depends on cross-type).
         layout.addWidget(self.stone_lock_btn)
 
         # 7. Save location field — stretches to fill remaining width.
@@ -185,6 +186,7 @@ class PlaylistItemWidget(QWidget):
         # source's — so .txt → .wav saves to output/Audio/, not output/Text/.
         self._refresh_save_field()
         self.compiler_checkbox.setVisible(self.target_ext() == ".py")
+        self._refresh_stone_lock_visibility()
         self.dst_combo.currentTextChanged.connect(self._on_target_changed)
 
     # --- public API ---------------------------------------------------------
@@ -249,6 +251,31 @@ class PlaylistItemWidget(QWidget):
             self.stone_lock_btn.setToolTip(
                 "Set Stone password (files round-trip with this password)")
 
+    def _is_cross_type_row(self) -> bool:
+        """True iff this row converts across media categories. Same-type
+        Stone (text→text, image→image, etc.) doesn't engage encryption,
+        so the password lock icon is meaningless and must be hidden."""
+        src = self.src_ext.lower()
+        dst = (self.target_ext() or "").lower()
+        if not dst or not src:
+            return False
+        # Non-media exts collapse to "doc"; matches the router's
+        # _is_cross_category logic so the UI gate stays in sync.
+        src_cat = fh.MEDIA_CATEGORY_OF.get(src, "doc")
+        dst_cat = fh.MEDIA_CATEGORY_OF.get(dst, "doc")
+        return src_cat != dst_cat
+
+    def _refresh_stone_lock_visibility(self) -> None:
+        """Show the lock icon only when Stone is on AND this row is a
+        cross-type conversion. Clears any stored password when the row
+        turns same-type — a leftover password would never apply, since
+        same-type Stone uses plaintext envelopes."""
+        visible = self._masquerade and self._is_cross_type_row()
+        self.stone_lock_btn.setVisible(visible)
+        if not visible and self._stone_password:
+            self._stone_password = b""
+            self._refresh_stone_lock_icon()
+
     def set_status(self, status: Status, error_msg: str | None = None) -> None:
         self._status = status
         self._is_running = status == Status.RUNNING
@@ -306,19 +333,16 @@ class PlaylistItemWidget(QWidget):
     def refresh_targets(self, masquerade: bool) -> None:
         """Re-populate dropdown when the global Masquerade toggle changes.
         Preserves the user's selection if it's still valid. Also toggles
-        the Stone-password lock icon's visibility and clears any stored
-        per-row password when Stone goes OFF (passwords don't leak across
-        Stone-disabled state)."""
+        the Stone-password lock icon's visibility (cross-type rows only)
+        and clears any stored per-row password when Stone goes OFF or
+        when the row drops out of cross-type."""
         previous = self.dst_combo.currentText()
         self._masquerade = masquerade
         self._populate_targets()
         if previous and self.dst_combo.findText(previous) >= 0:
             self.dst_combo.setCurrentText(previous)
-        # Lock icon visibility + clear-on-disable.
-        self.stone_lock_btn.setVisible(masquerade)
-        if not masquerade:
-            self._stone_password = b""
-            self._refresh_stone_lock_icon()
+        # Lock icon visibility (cross-type-gated) + clear-on-hide.
+        self._refresh_stone_lock_visibility()
 
     def _default_save_dir(self) -> Path:
         """Pick the output folder based on the *target* extension's category.
@@ -351,6 +375,8 @@ class PlaylistItemWidget(QWidget):
         self.compiler_checkbox.setVisible(is_py)
         if not is_py:
             self.compiler_checkbox.setChecked(False)
+        # Lock icon is gated on cross-type — re-evaluate when target changes.
+        self._refresh_stone_lock_visibility()
 
     def _toggle_save_field(self, checked: bool) -> None:
         self.save_field.setVisible(not checked)
