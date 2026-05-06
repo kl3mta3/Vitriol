@@ -47,12 +47,14 @@ MAGIC_V2 = b"UCMSv2\0\0"  # 8 bytes — tiered-image-dimensions envelope (PNG/BM
 MAGIC_V3 = b"UCMSv3\0\0"  # 8 bytes — encrypted Mandelbrot envelope (PNG/BMP)
 MAGIC_V3_AUDIO = b"uM03\0\0\0\0"  # 8 bytes — encrypted music envelope (WAV/AIFF/FLAC)
 MAGIC_V3_3D = b"UC3Dv3\0\0"  # 8 bytes — encrypted 3D envelope (PLY/OBJ/GLB)
+MAGIC_V3_VIDEO = b"UCMv3\0\0\0"  # 8 bytes — encrypted animated-Mandelbrot envelope (MKV)
 
 # Read-write capable host extensions. Used by the registry + dropdown filter
 # when Philosopher's Stone (a.k.a. Masquerade) mode is on.
 TARGETS = {".wav", ".png", ".bmp", ".txt", ".mkv", ".py",
            ".ply", ".obj", ".glb",
-           ".aiff", ".flac"}
+           ".aiff", ".flac",
+           ".zip"}
 # .fbx is intentionally excluded as a Stone host (autodesk-proprietary
 # binary; readers are notoriously strict, no clean place to drop a payload).
 # .flac is a Stone host but only via the music encoder (cross-category) —
@@ -106,6 +108,17 @@ def has_envelope(path: "Path", ext: str) -> bool:
             return _py_is_stone(Path(path))
         except Exception:
             return False
+    # .zip is a Stone host only when it has exactly one member named
+    # `original.*`. Cheap: stdlib zipfile namelist, no decompression.
+    if ext == ".zip":
+        try:
+            import zipfile as _zf
+            with _zf.ZipFile(Path(path)) as z:
+                names = z.namelist()
+                return (len(names) == 1
+                        and names[0].startswith(_ZIP_MEMBER_PREFIX + "."))
+        except Exception:
+            return False
     try:
         with open(path, "rb") as f:
             head = f.read(64 * 1024)
@@ -113,10 +126,17 @@ def has_envelope(path: "Path", ext: str) -> bool:
         return False
     if MAGIC in head or MAGIC_V2 in head:
         return True
-    # MKV: rely on the title tag we set at embed time. Tag value is stored
-    # as UTF-8 in the EBML Tags section, near the file start.
-    if ext == ".mkv" and b"UCMSv1" in head:
-        return True
+    # MKV: legacy plaintext path stamped a `UCMSv1` title tag. v3 MKV files
+    # don't write that tag (it leaked the format identity). For v3 we have
+    # to do a one-frame FFmpeg decode + bit-unpack probe — more expensive
+    # but only fires when Stone is on AND the file's actual ext is .mkv.
+    if ext == ".mkv":
+        if b"UCMSv1" in head:
+            return True
+        try:
+            return _mkv_v3_envelope_probe(Path(path))
+        except Exception:
+            return False
     # PLY / OBJ hosts: envelope is base64'd inside `comment` / `#` lines.
     # Look for the tagged comment prefix.
     if ext == ".ply" and b"comment uc " in head:
@@ -300,16 +320,28 @@ def _v2_envelope_present_in_pixels(pixel_iter, width: int, height: int,
         bytes(scratch), 64, total_pixel_bytes=total)
     return MAGIC_V2 in env_prefix_v2
 
-# MKV host parameters. 42 fps is intentional — non-standard rate that
-# fingerprints Masquerade output: combined with the UCMSv1 magic in the
-# first frame's pixels, anyone can identify "this is a Masquerade file"
-# just by reading the container header. Minimum 42 frames so the clip is
-# always at least 1.0 seconds at 42 fps.
+# MKV host parameters. v3 dropped the 42 fps fingerprint in favor of
+# standard 30 fps + a 10-second minimum (300 frames). Each frame carries
+# part of the encrypted v3 envelope as 1 bit per pixel byte (k=1, same as
+# the image side); the top 7 bits hold the animated Mandelbrot fractal.
+# For payloads that don't fill 300 frames, the tail frames are pure
+# fractal (zero LSBs), making short videos visually indistinguishable
+# from a real Mandelbrot flythrough.
 MKV_FRAME_W = 1024
 MKV_FRAME_H = 1024
-MKV_BYTES_PER_FRAME = MKV_FRAME_W * MKV_FRAME_H * 3  # rgb24
-MKV_FPS = 42
-MKV_MIN_FRAMES = 42
+MKV_BYTES_PER_FRAME = MKV_FRAME_W * MKV_FRAME_H * 3        # rgb24, total pixel bytes
+MKV_ENVELOPE_BYTES_PER_FRAME = MKV_BYTES_PER_FRAME // 8    # k=1 bit-pack ⇒ 1 byte env per 8 pixel bytes
+MKV_FPS = 30
+MKV_MIN_FRAMES = 300                                        # 10-second floor at 30 fps
+
+# The Mandelbrot fractal is rendered at this internal resolution per frame
+# and bilinear-upscaled to MKV_FRAME_W × MKV_FRAME_H before bit-packing.
+# Rendering at full 1024² on every frame would take 2-3s per frame ⇒ ~15
+# minutes per 10-sec output. The bit-pack carrier is always at 1024² so
+# capacity isn't affected — only the fractal's pixel-perfect detail is.
+# 384 keeps recognizably crisp boundary detail while cutting per-frame
+# fractal cost ~7×.
+MKV_FRACTAL_RENDER_DIM = 384
 
 
 def is_target(ext: str) -> bool:
@@ -808,8 +840,10 @@ def _ffmpeg_path() -> Path:
 
 
 def _mkv_pad_payload(env: bytes) -> tuple[bytes, int, int, int]:
-    """Pad envelope to N whole frames. Returns (padded_bytes, n_real_frames,
-    n_total_frames, n_padding_frames)."""
+    """Legacy plaintext UCMSv1 path: pad envelope to N whole frames.
+    Returns (padded_bytes, n_real_frames, n_total_frames, n_padding_frames).
+    Kept ONLY for the legacy embed branch — v3 video uses bit-pack and
+    different framing math via `_mkv_v3_frame_count`."""
     n_real_frames = max(1, math.ceil(len(env) / MKV_BYTES_PER_FRAME))
     n_total_frames = max(MKV_MIN_FRAMES, n_real_frames)
     n_padding = n_total_frames - n_real_frames
@@ -818,17 +852,204 @@ def _mkv_pad_payload(env: bytes) -> tuple[bytes, int, int, int]:
     return padded, n_real_frames, n_total_frames, n_padding
 
 
-def _mkv_embed_to_file(src_bytes: bytes, src_ext: str, dst: Path) -> None:
-    env = _build_envelope(src_bytes, src_ext)
-    padded, n_real, n_total, n_pad = _mkv_pad_payload(env)
+def _mkv_v3_envelope_probe(src: Path) -> bool:
+    """Cheap detection: FFmpeg-decode just the first frame, bit-unpack the
+    first 8 bytes via the same scatter pattern the encoder uses, and check
+    for `MAGIC_V3_VIDEO`. Used by `has_envelope` to identify v3 MKVs that
+    don't carry the legacy `UCMSv1` title tag."""
     ffmpeg = _ffmpeg_path()
     creationflags = 0x08000000 if os.name == "nt" else 0
-    # FFV1 (lossless intra-only video codec) instead of rawvideo. Matroska
-    # doesn't natively support raw RGB — FFmpeg errors with "Raw RGB is not
-    # supported Natively in Matroska". FFV1 is mathematically lossless: every
-    # input RGB pixel decodes back to the exact same bytes, which is all our
-    # envelope needs. Bonus: it compresses (modestly, since payload bytes
-    # interpreted as pixels are essentially random), so the .mkv is smaller.
+    args = [
+        str(ffmpeg), "-y", "-i", str(src),
+        "-frames:v", "1",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
+        "-",
+    ]
+    proc = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    raw, _ = proc.communicate(timeout=60)
+    if proc.returncode != 0 or len(raw) < MKV_BYTES_PER_FRAME:
+        return False
+    head = _mandelbrot_unpack_envelope_from_pixels(
+        raw[:MKV_BYTES_PER_FRAME], len(MAGIC_V3_VIDEO),
+        total_pixel_bytes=MKV_BYTES_PER_FRAME)
+    return head.startswith(MAGIC_V3_VIDEO)
+
+
+def _mkv_v3_frame_count(envelope_size: int) -> int:
+    """Number of frames needed for a v3 video output. At least
+    MKV_MIN_FRAMES (10-sec floor at 30 fps); larger envelopes extend
+    naturally past the floor."""
+    real = max(1, math.ceil(envelope_size / MKV_ENVELOPE_BYTES_PER_FRAME))
+    return max(MKV_MIN_FRAMES, real)
+
+
+def _mkv_choose_base_viewport(envelope: bytes):
+    """Pick a base viewport that's known interesting BEFORE rendering any
+    frames. Returns the 7-tuple (cx, cy, half_width, r_phase, g_phase,
+    b_phase, palette_id).
+
+    Uses `derive_seed_unjittered` — the curated viewport's exact center
+    (no per-source jitter), guaranteed by the curated table to land on
+    the boundary at the viewport's native hw. Validates at the most
+    zoomed-in extreme of the planned animation as a belt-and-suspenders
+    check; if somehow that fails (the zoom is too tight for this
+    particular curated viewport), swap once to the universal whole-set
+    view so every frame in the clip still shares the same base.
+    """
+    from . import _mandelbrot as _m
+    base_cx, base_cy, base_hw, r_ph, g_ph, b_ph, palette_id = (
+        _m.derive_seed_unjittered(envelope))
+    # Belt-and-suspenders: test the most zoomed-in frame (smallest hw).
+    test_hw = base_hw * _MKV_ZOOM_LO
+    if not _m.viewport_is_interesting(128, 128, base_cx, base_cy, test_hw):
+        base_cx, base_cy, base_hw = _m._FALLBACK_VIEWPORT
+    return (base_cx, base_cy, base_hw, r_ph, g_ph, b_ph, palette_id)
+
+
+# Zoom range: cur_hw spans base_hw × _MKV_ZOOM_LO at frame 0
+# (most zoomed-IN) up to base_hw × _MKV_ZOOM_HI at the final frame
+# (most zoomed-OUT). 0.4x → 1.6x = 4× total zoom-out across the clip,
+# stays close to the curated viewport's sweet spot so we don't drift
+# into uniform regions or shrink the fractal to a dot.
+_MKV_ZOOM_LO = 0.4
+_MKV_ZOOM_HI = 1.6
+
+
+def _mkv_frame_viewport(base_seed, frame_idx: int, n_frames: int):
+    """Per-frame Mandelbrot seed for the v3 video flythrough. Takes a
+    pre-validated base seed (from `_mkv_choose_base_viewport`) and
+    animates a smooth zoom-out + slow palette-phase drift around the
+    fixed base center. Returns the 7-tuple
+    (cx, cy, half_width, r_phase, g_phase, b_phase, palette_id) that
+    `_mandelbrot.generate_keystream` accepts.
+
+    Animation rules:
+      - Center stays FIXED on the base viewport — no per-frame pan.
+        Same fractal, slowly revealing more context.
+      - Zoom goes from `_MKV_ZOOM_LO * base_hw` (frame 0, tight)
+        smoothly up to `_MKV_ZOOM_HI * base_hw` (last frame, wide).
+        Exponential interpolation so each step is a constant
+        multiplicative ratio (visually smooth).
+      - Palette phases drift sinusoidally over the clip so colors
+        cycle gently — gives the fractal's body and arms a lively
+        "breathing" feel without changing the underlying shape.
+    """
+    base_cx, base_cy, base_hw, r_ph, g_ph, b_ph, palette_id = base_seed
+
+    t = (frame_idx / max(1, n_frames - 1)) if n_frames > 1 else 0.0
+
+    # Smooth zoom-out: cur_hw grows from base_hw × LO to base_hw × HI.
+    cur_hw = base_hw * (_MKV_ZOOM_LO ** (1.0 - t)) * (_MKV_ZOOM_HI ** t)
+
+    # Palette drift: ±π/3 over the clip, channels offset by 120° / 240°
+    # so the color shift moves through hue space rather than just
+    # brightening/darkening uniformly.
+    drift = math.sin(t * 2.0 * math.pi) * (math.pi / 3.0)
+    return (base_cx, base_cy, cur_hw,
+            r_ph + drift,
+            g_ph + drift * 0.7,
+            b_ph + drift * 1.3,
+            palette_id)
+
+
+def _mkv_build_frames_iter(envelope: bytes, n_frames: int):
+    """Yield exactly n_frames pixel-byte buffers (each MKV_BYTES_PER_FRAME
+    long) ready for FFmpeg's rawvideo stdin. Each frame renders the SAME
+    base Mandelbrot viewport (chosen once + validated up-front) at a
+    smoothly-shifting zoom factor, with `MKV_ENVELOPE_BYTES_PER_FRAME`
+    bytes of the v3 envelope bit-packed into pixel LSBs. Tail frames past
+    the envelope use empty bit-packs (pure fractal).
+
+    The fractal is computed at MKV_FRACTAL_RENDER_DIM (default 384) and
+    bilinear-upscaled to MKV_FRAME_W × MKV_FRAME_H before bit-packing.
+    Bit-pack runs at the full output resolution so carrier capacity is
+    unchanged.
+
+    `safety_net=False` is critical here: the per-frame fallback inside
+    `generate_keystream` would otherwise swap mid-clip when individual
+    frames cross into uniform regions, causing the "different fractals
+    flickering" effect the user reported. The base viewport is
+    pre-validated by `_mkv_choose_base_viewport` so we don't need a
+    per-frame fallback — the chosen base stays interesting throughout
+    the zoom-out range."""
+    from . import _mandelbrot as _m
+    from PIL import Image as _PIL
+    env_len = len(envelope)
+    base_seed = _mkv_choose_base_viewport(envelope)
+    for f in range(n_frames):
+        seed = _mkv_frame_viewport(base_seed, f, n_frames)
+        # Render at reduced internal dim then bilinear-upscale.
+        small = _m.generate_keystream(MKV_FRACTAL_RENDER_DIM,
+                                       MKV_FRACTAL_RENDER_DIM, seed,
+                                       safety_net=False)
+        if MKV_FRACTAL_RENDER_DIM != MKV_FRAME_W:
+            img = _PIL.frombuffer(
+                "RGB", (MKV_FRACTAL_RENDER_DIM, MKV_FRACTAL_RENDER_DIM),
+                small, "raw", "RGB", 0, 1)
+            img = img.resize((MKV_FRAME_W, MKV_FRAME_H),
+                              _PIL.Resampling.BILINEAR)
+            fractal = img.tobytes()
+        else:
+            fractal = small
+        # Slice the envelope chunk for this frame.
+        chunk_start = f * MKV_ENVELOPE_BYTES_PER_FRAME
+        chunk_end = min(env_len, chunk_start + MKV_ENVELOPE_BYTES_PER_FRAME)
+        chunk = envelope[chunk_start:chunk_end] if chunk_start < env_len else b""
+        # Bit-pack the chunk into the fractal's LSBs (k=1 scatter pattern).
+        # The scatter stride is a function of total_pixel_bytes only, so
+        # both encoder and decoder agree on the pattern without sharing
+        # any side-channel.
+        pixel_bytes = _mandelbrot_pack_envelope_into_fractal(
+            chunk, fractal, MKV_BYTES_PER_FRAME)
+        yield pixel_bytes
+
+
+def _mkv_embed_to_file(src_bytes: bytes, src_ext: str, dst: Path,
+                        cross_category: bool = False,
+                        password: bytes = b"") -> None:
+    """Encode the source as a Matroska/FFV1 video. Cross-category outputs
+    (image/audio/doc → MKV) build a v3 envelope encrypted under `password`
+    and bit-pack it across an animated-Mandelbrot frame sequence (10-sec
+    minimum, 30 fps, 1024×1024). Same-category video → MKV (rare) keeps
+    the legacy plaintext UCMSv1 path for backward compatibility."""
+    if cross_category:
+        envelope = _v3_video_envelope(src_bytes, src_ext, password)
+        n_frames = _mkv_v3_frame_count(len(envelope))
+        frames_iter = _mkv_build_frames_iter(envelope, n_frames)
+        # No identifying metadata tags — the v3 magic at the start of the
+        # bit-packed pixel stream is identification enough, and the old
+        # UC_PAYLOAD_SIZE / UC_ORIG_EXT tags would leak source size and
+        # extension in the clear (defeats the v3 "ext is hidden" property).
+        metadata_args: list[str] = []
+        payload_iter = frames_iter
+    else:
+        env = _build_envelope(src_bytes, src_ext)
+        padded, n_real, n_total, n_pad = _mkv_pad_payload(env)
+        n_frames = n_total
+        # Legacy plaintext path uses the title tag for has_envelope detection
+        # (decoder fall-through path); the metadata is OK here because nothing
+        # is encrypted to begin with.
+        metadata_args = [
+            "-metadata", "title=UCMSv1",
+            "-metadata", f"UC_PAYLOAD_SIZE={len(src_bytes)}",
+            "-metadata", f"UC_REAL_FRAMES={n_real}",
+            "-metadata", f"UC_PADDING_FRAMES={n_pad}",
+            "-metadata", f"UC_FRAME_W={MKV_FRAME_W}",
+            "-metadata", f"UC_FRAME_H={MKV_FRAME_H}",
+            "-metadata", f"UC_ORIG_EXT={src_ext}",
+        ]
+        # Single-buffer iterator since legacy path holds the full padded
+        # blob in memory (was the prior behavior).
+        payload_iter = iter([padded])
+
+    ffmpeg = _ffmpeg_path()
+    creationflags = 0x08000000 if os.name == "nt" else 0
+    # FFV1: mathematically lossless intra-only codec. Matroska refuses raw
+    # RGB but accepts FFV1, which decodes pixel-for-pixel to the original
+    # input — exactly what the bit-packed envelope needs.
     args = [
         str(ffmpeg), "-y",
         "-f", "rawvideo",
@@ -845,13 +1066,7 @@ def _mkv_embed_to_file(src_bytes: bytes, src_ext: str, dst: Path) -> None:
         "-slicecrc", "1",
         "-pix_fmt", "rgb24",
         "-r", str(MKV_FPS),
-        "-metadata", "title=UCMSv1",
-        "-metadata", f"UC_PAYLOAD_SIZE={len(src_bytes)}",
-        "-metadata", f"UC_REAL_FRAMES={n_real}",
-        "-metadata", f"UC_PADDING_FRAMES={n_pad}",
-        "-metadata", f"UC_FRAME_W={MKV_FRAME_W}",
-        "-metadata", f"UC_FRAME_H={MKV_FRAME_H}",
-        "-metadata", f"UC_ORIG_EXT={src_ext}",
+        *metadata_args,
         str(dst),
     ]
     proc = subprocess.Popen(
@@ -859,18 +1074,28 @@ def _mkv_embed_to_file(src_bytes: bytes, src_ext: str, dst: Path) -> None:
         stderr=subprocess.PIPE, creationflags=creationflags,
     )
     try:
-        proc.stdin.write(padded)
+        for chunk in payload_iter:
+            proc.stdin.write(chunk)
         proc.stdin.close()
     except (BrokenPipeError, OSError):
         pass
-    _, stderr = proc.communicate(timeout=600)
+    _, stderr = proc.communicate(timeout=1200)
     if proc.returncode != 0:
         tail = (stderr or b"").decode("utf-8", errors="replace")[-800:]
         raise RuntimeError(f"FFmpeg MKV embed failed (exit {proc.returncode}): {tail}")
 
 
-def _mkv_extract_from_file(src: Path) -> Tuple[bytes, str]:
-    """Pipe the MKV through FFmpeg → raw rgb24 frames → parse envelope."""
+def _mkv_extract_from_file(src: Path,
+                            password: bytes = b"") -> Tuple[bytes, str]:
+    """Pipe the MKV through FFmpeg → raw rgb24 frames → bit-unpack the
+    v3 envelope (or fall back to legacy plaintext-bytes-in-pixels). v3
+    uses the password to decrypt; legacy ignores it.
+
+    Dual-detect by reading the first frame's bit-packed magic. If the
+    bit-unpacked magic is `MAGIC_V3_VIDEO`, decrypt under `password`.
+    Otherwise, assume the legacy UCMSv1 path (raw envelope bytes packed
+    consecutively into pixel bytes) and fall through to `_parse_envelope`.
+    """
     ffmpeg = _ffmpeg_path()
     creationflags = 0x08000000 if os.name == "nt" else 0
     args = [
@@ -882,10 +1107,43 @@ def _mkv_extract_from_file(src: Path) -> Tuple[bytes, str]:
         args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         creationflags=creationflags,
     )
-    raw, stderr = proc.communicate(timeout=600)
+    raw, stderr = proc.communicate(timeout=1200)
     if proc.returncode != 0:
         tail = (stderr or b"").decode("utf-8", errors="replace")[-800:]
         raise RuntimeError(f"FFmpeg MKV extract failed (exit {proc.returncode}): {tail}")
+
+    # Probe the first frame for v3 magic via the bit-pack scatter pattern.
+    # The scatter stride is a function of total_pixel_bytes only; using
+    # MKV_BYTES_PER_FRAME for the per-frame probe matches what the encoder
+    # used per frame.
+    first_frame = raw[:MKV_BYTES_PER_FRAME]
+    if len(first_frame) >= MKV_BYTES_PER_FRAME:
+        head_unpacked = _mandelbrot_unpack_envelope_from_pixels(
+            first_frame, V3_VIDEO_HEADER_SIZE,
+            total_pixel_bytes=MKV_BYTES_PER_FRAME)
+        if head_unpacked.startswith(MAGIC_V3_VIDEO):
+            ciphertext_len = struct.unpack(">Q", head_unpacked[8:16])[0]
+            total_env = V3_VIDEO_HEADER_SIZE + ciphertext_len
+            # How many whole frames cover the envelope?
+            frames_needed = math.ceil(total_env / MKV_ENVELOPE_BYTES_PER_FRAME)
+            # Walk through that many frames, bit-unpack each, concatenate.
+            envelope_buf = bytearray()
+            for f in range(frames_needed):
+                fstart = f * MKV_BYTES_PER_FRAME
+                fend = fstart + MKV_BYTES_PER_FRAME
+                if fend > len(raw):
+                    break
+                frame_pixels = raw[fstart:fend]
+                # Each frame yields up to MKV_ENVELOPE_BYTES_PER_FRAME envelope bytes.
+                want = min(MKV_ENVELOPE_BYTES_PER_FRAME, total_env - len(envelope_buf))
+                chunk = _mandelbrot_unpack_envelope_from_pixels(
+                    frame_pixels, want, total_pixel_bytes=MKV_BYTES_PER_FRAME)
+                envelope_buf.extend(chunk)
+                if len(envelope_buf) >= total_env:
+                    break
+            return _parse_v3_video_envelope(bytes(envelope_buf[:total_env]), password)
+
+    # Legacy plaintext UCMSv1 fall-back.
     return _parse_envelope(raw)
 
 
@@ -1467,6 +1725,44 @@ def _parse_v3_3d_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
     return _parse_v3_inner_clamped(inner)
 
 
+def _v3_video_envelope(payload: bytes, src_ext: str, password: bytes) -> bytes:
+    """Build encrypted video envelope:
+        MAGIC_V3_VIDEO (8) | ciphertext_len (8 BE) | IV (16) | salt (4) | ciphertext
+
+    Used by MKV cross-category embed. The whole envelope is bit-packed
+    (k=1) across the LSBs of an animated Mandelbrot frame sequence."""
+    from . import _stone_crypto as _sc
+    inner = _build_inner_plaintext(payload, src_ext)
+    iv, ciphertext = _sc.encrypt(inner, password)
+    salt_field = b"\x00\x00\x00\x00"
+    return (MAGIC_V3_VIDEO
+            + struct.pack(">Q", len(ciphertext))
+            + iv + salt_field
+            + ciphertext)
+
+
+V3_VIDEO_HEADER_SIZE = len(MAGIC_V3_VIDEO) + 8 + 16 + 4   # = 36
+
+
+def _parse_v3_video_envelope(blob: bytes, password: bytes) -> "Tuple[bytes, str]":
+    """Parse encrypted video envelope. Wrong password → silent garbage."""
+    from . import _stone_crypto as _sc
+    if len(blob) < V3_VIDEO_HEADER_SIZE:
+        raise ValueError("v3 video envelope: too short.")
+    if not blob.startswith(MAGIC_V3_VIDEO):
+        raise ValueError("v3 video envelope: magic not found.")
+    p = len(MAGIC_V3_VIDEO)
+    ciphertext_len = struct.unpack(">Q", blob[p:p + 8])[0]; p += 8
+    iv = blob[p:p + 16]; p += 16
+    _salt = blob[p:p + 4]; p += 4
+    ciphertext = blob[p:p + ciphertext_len]
+    if len(ciphertext) != ciphertext_len:
+        raise ValueError(
+            f"v3 video envelope: truncated (need {ciphertext_len}, got {len(ciphertext)}).")
+    inner = _sc.decrypt(iv, ciphertext, password)
+    return _parse_v3_inner_clamped(inner)
+
+
 def _build_mandelbrot_image(src_bytes: bytes, src_ext: str,
                              password: bytes = b"",
                              cancel: Optional["CancellationToken"] = None
@@ -1978,6 +2274,70 @@ def _glb_extract(host: bytes, password: bytes = b"") -> Tuple[bytes, str]:
 
 
 # ---------------------------------------------------------------------------
+# Host: ZIP (transparent archive — single STORED member named original{ext})
+# ---------------------------------------------------------------------------
+# The output is a real, valid ZIP file. Opening it with Windows Explorer or
+# any zip tool extracts a single member that IS the original source file,
+# byte-for-byte. Round-trip via Transmute also works (zip → png recovers the
+# PNG). Always plaintext — encryption would corrupt the archive structure
+# and defeat the "real zip" property, so the password parameter is
+# intentionally not threaded into this path.
+#
+# Decoder rule for round-trip: only "Stone-built" zips (exactly one member
+# whose name starts with `original.`) are auto-extracted. Any other zip is
+# treated as opaque bytes by `_zip_extract` (raises ValueError, which
+# `_try_extract` catches and translates to None). That lets the user wrap
+# a regular multi-file zip *inside* a Transmute zip without having the
+# inner zip silently unpacked.
+
+_ZIP_MEMBER_PREFIX = "original"
+
+
+def _zip_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    """Build a real STORED-method zip with one member named `original{ext}`."""
+    import io
+    import zipfile as _zf
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext if src_ext else ""
+    member_name = _ZIP_MEMBER_PREFIX + src_ext
+    buf = io.BytesIO()
+    with _zf.ZipFile(buf, mode="w", compression=_zf.ZIP_STORED) as z:
+        z.writestr(member_name, src_bytes)
+    return buf.getvalue()
+
+
+def _zip_extract(host: bytes) -> Tuple[bytes, str]:
+    """If `host` is a Stone-built zip (exactly one member named original.*),
+    return that member's bytes + extension. Any other zip raises ValueError
+    so `_try_extract` falls through to opaque-bytes wrapping."""
+    import io
+    import zipfile as _zf
+    try:
+        z = _zf.ZipFile(io.BytesIO(host))
+    except _zf.BadZipFile as e:
+        raise ValueError(f"ZIP host: not a valid zip ({e}).")
+    try:
+        names = z.namelist()
+        if len(names) != 1:
+            raise ValueError(
+                f"ZIP host: expected one member, got {len(names)}; "
+                "treating as opaque bytes.")
+        name = names[0]
+        if not name.startswith(_ZIP_MEMBER_PREFIX + "."):
+            raise ValueError(
+                f"ZIP host: member name {name!r} doesn't match "
+                "Stone-built `original.*` pattern.")
+        body = z.read(name)
+        # Recover ext from the member name (strip the "original" prefix).
+        ext = name[len(_ZIP_MEMBER_PREFIX):]
+        if not ext.startswith("."):
+            ext = "." + ext if ext else ".bin"
+        return body, ext
+    finally:
+        z.close()
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1986,6 +2346,7 @@ _EMBED = {
     ".txt": _txt_embed,
     ".ply": _ply_embed, ".obj": _obj_embed, ".glb": _glb_embed,
     ".aiff": _aiff_embed,
+    ".zip": _zip_embed,
     # .flac is dispatched specially below (needs Path target for FFmpeg).
 }
 _EXTRACT = {
@@ -1994,6 +2355,7 @@ _EXTRACT = {
     ".ply": _ply_extract, ".obj": _obj_extract, ".glb": _glb_extract,
     ".aiff": _aiff_extract,
     ".flac": _flac_extract_from_bytes,
+    ".zip": _zip_extract,
 }
 
 
@@ -2020,7 +2382,7 @@ def _try_extract(src: Path, src_ext: str,
     src_ext = src_ext.lower()
     try:
         if src_ext == ".mkv":
-            return _mkv_extract_from_file(src)
+            return _mkv_extract_from_file(src, password=password)
         if src_ext == ".py":
             if not _py_is_stone(src):
                 return None
@@ -2084,7 +2446,8 @@ def _embed_to(dst: Path, payload: bytes, src_ext: str, dst_ext: str,
     """
     dst_ext = dst_ext.lower()
     if dst_ext == ".mkv":
-        _mkv_embed_to_file(payload, src_ext, dst)
+        _mkv_embed_to_file(payload, src_ext, dst,
+                           cross_category=cross_category, password=password)
         return
     if dst_ext == ".png":
         _png_embed_v2_from_bytes(payload, src_ext, dst,

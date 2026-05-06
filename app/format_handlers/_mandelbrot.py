@@ -301,7 +301,41 @@ _PALETTES = (
 )
 
 
-def generate_keystream(width: int, height: int, seed) -> bytes:
+def derive_seed_unjittered(magic_bytes: bytes
+                            ) -> Tuple[float, float, float, float, float, float, int]:
+    """Like `derive_seed` but skips the per-source viewport jitter — the
+    curated viewport's exact pre-tuned center is used. The jitter is
+    great for one-shot images (it varies same-viewport sources) but is
+    a liability for video, where it can push the centre off the
+    boundary into a uniform region. The video pipeline picks a base
+    viewport once via this function so every frame in the clip uses the
+    exact same pre-curated centre."""
+    h = hashlib.sha256(magic_bytes).digest()
+    idx = h[0] % len(_VIEWPORTS)
+    cx, cy, hw = _VIEWPORTS[idx]
+    r_phase = (h[24] / 255.0) * _TAU
+    g_phase = (h[25] / 255.0) * _TAU
+    b_phase = (h[26] / 255.0) * _TAU
+    palette_id = h[27] % _NUM_PALETTES
+    return (cx, cy, hw, r_phase, g_phase, b_phase, palette_id)
+
+
+def viewport_is_interesting(width: int, height: int,
+                             cx: float, cy: float, hw: float) -> bool:
+    """Quick boundary check: does this viewport land on the Mandelbrot
+    boundary (a healthy mix of inside-set + escape-fast pixels)?
+
+    Used by the video pipeline to validate the base viewport ONCE
+    before rendering 300+ frames at it — if the curated seed jittered
+    off into a uniform region, the video would otherwise be a solid
+    color throughout. Cheap (one tiny Mandelbrot iter at e.g. 128×128)."""
+    iter_count = _mandelbrot_iter_count(width, height, (cx, cy, hw))
+    inside_fraction = float((iter_count >= 255).sum()) / iter_count.size
+    return 0.001 <= inside_fraction <= 0.92
+
+
+def generate_keystream(width: int, height: int, seed,
+                       safety_net: bool = True) -> bytes:
     """Generate a width*height*3 byte RGB keystream rendering a colored
     Mandelbrot fractal. The fractal occupies the full image (no tiling).
 
@@ -309,6 +343,14 @@ def generate_keystream(width: int, height: int, seed) -> bytes:
     palette_id) returned by `derive_seed`. The first three drive the
     Mandelbrot iteration; the next three set palette colors; the last
     selects which palette algorithm to use.
+
+    `safety_net=True` (default, for image use): if the rendered fractal
+    is too uniform (all-inside or all-outside the set), silently swap to
+    a fallback whole-set view so we never produce a solid-color image.
+    The fallback's offsets depend on the input center, which is fine
+    for one-shot images but causes per-frame viewport jumps when
+    rendering animated video. Video should pass `safety_net=False` and
+    pre-validate the base viewport via `viewport_is_interesting`.
 
     For images larger than _FRACTAL_CAP, the fractal is computed at the
     capped resolution and Pillow-resized up.
@@ -339,14 +381,17 @@ def generate_keystream(width: int, height: int, seed) -> bytes:
         comp_w, comp_h, (center_x, center_y, half_width))
 
     # Safety net: regenerate at fallback whole-set view if the source-
-    # picked viewport landed in an all-uniform region.
-    inside_fraction = float((iter_count >= 255).sum()) / iter_count.size
-    if inside_fraction > 0.92 or inside_fraction < 0.001:
-        fb_cx, fb_cy, fb_hw = _FALLBACK_VIEWPORT
-        iter_count = _mandelbrot_iter_count(
-            comp_w, comp_h, (fb_cx + (center_x % 0.3) - 0.15,
-                              fb_cy + (center_y % 0.2) - 0.1,
-                              fb_hw))
+    # picked viewport landed in an all-uniform region. Disabled by the
+    # video path (see docstring): the fallback's per-call offsets cause
+    # mid-clip viewport jumps when called per-frame.
+    if safety_net:
+        inside_fraction = float((iter_count >= 255).sum()) / iter_count.size
+        if inside_fraction > 0.92 or inside_fraction < 0.001:
+            fb_cx, fb_cy, fb_hw = _FALLBACK_VIEWPORT
+            iter_count = _mandelbrot_iter_count(
+                comp_w, comp_h, (fb_cx + (center_x % 0.3) - 0.15,
+                                  fb_cy + (center_y % 0.2) - 0.1,
+                                  fb_hw))
 
     n = iter_count.astype(np.float64)
     palette_fn = _PALETTES[palette_id % len(_PALETTES)]

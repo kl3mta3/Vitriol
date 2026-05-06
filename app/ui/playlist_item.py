@@ -267,12 +267,17 @@ class PlaylistItemWidget(QWidget):
                 "Set Stone password (files round-trip with this password)")
 
     def _is_cross_type_row(self) -> bool:
-        """True iff this row converts across media categories. Same-type
-        Stone (text→text, image→image, etc.) doesn't engage encryption,
-        so the password lock icon is meaningless and must be hidden."""
+        """True iff this row would actually engage encryption. Cross-category
+        rows (text→audio, image→video, etc.) trigger v3 encryption; same-type
+        rows do not. Zip targets are special-cased to ALWAYS return False
+        regardless of cross-type — zip never encrypts, since encryption would
+        corrupt the archive structure and defeat the "real zip" property."""
         src = self.src_ext.lower()
         dst = (self.target_ext() or "").lower()
         if not dst or not src:
+            return False
+        # Zip targets never encrypt — hide the icon regardless of category.
+        if dst == ".zip":
             return False
         # Non-media exts collapse to "doc"; matches the router's
         # _is_cross_category logic so the UI gate stays in sync.

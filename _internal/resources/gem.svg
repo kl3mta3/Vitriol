@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Faceted gem icon — used as the prefix glyph next to the "Philosopher's Stone"
+  toggle when it is enabled. Stylized brilliant-cut crown view with a single
+  highlight. Original design.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <linearGradient id="gemFace" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff7a8a"/>
+      <stop offset="60%" stop-color="#c0392b"/>
+      <stop offset="100%" stop-color="#5e051b"/>
+    </linearGradient>
+    <linearGradient id="gemTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffd1d8"/>
+      <stop offset="100%" stop-color="#c0392b"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Crown facets -->
+  <polygon points="6,12 16,4 26,12 22,12 16,8 10,12" fill="url(#gemTop)" stroke="#5e051b" stroke-width="0.6"/>
+  <!-- Body facets -->
+  <polygon points="6,12 26,12 16,28" fill="url(#gemFace)" stroke="#5e051b" stroke-width="0.6"/>
+  <!-- Inner facet split -->
+  <polygon points="10,12 22,12 16,28" fill="none" stroke="#ffd1d8" stroke-width="0.5" opacity="0.55"/>
+  <!-- Highlight -->
+  <polygon points="11,13 14,13 13,18" fill="#ffd1d8" opacity="0.55"/>
+</svg>

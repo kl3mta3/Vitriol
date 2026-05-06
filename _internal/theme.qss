@@ -1,0 +1,200 @@
+/* Transmute — dark theme */
+
+QMainWindow, QWidget {
+    background-color: #0a0a0f;
+    color: #e8e8f0;
+    font-size: 13px;
+}
+
+QFrame#Card, QWidget#Card {
+    background-color: #15151f;
+    border-radius: 8px;
+}
+
+QFrame#PlaylistFrame {
+    background-color: #0d0d15;
+    border-radius: 8px;
+    border: 1px solid #1f1f2e;
+}
+
+QLabel { color: #e8e8f0; background: transparent; }
+QLabel#Muted { color: #9090a0; }
+QLabel#AppTitle { font-size: 18px; font-weight: 600; padding: 8px 12px; }
+
+QPushButton {
+    background-color: #1f1f2e;
+    color: #e8e8f0;
+    border: 1px solid #2a2a3a;
+    border-radius: 6px;
+    padding: 6px 14px;
+	font-family: "Cinzel";
+    font-size: 10pt;
+	font-weight: 600;
+}
+QPushButton:hover { background-color: #2a2a3a; border-color: #3b82f6; }
+QPushButton:pressed { background-color: #15151f; }
+QPushButton:disabled { color: #555560; background-color: #15151f; }
+
+QPushButton#Primary {
+    background-color: #8b5cf6;
+    border: 1px solid #8b5cf6;
+    color: #ffffff;
+    font-weight: 600;
+}
+QPushButton#Primary:hover { background-color: #9d72ff; border-color: #9d72ff; }
+QPushButton#Primary:pressed { background-color: #7045d4; }
+
+QPushButton#Secondary {
+    background-color: #3b82f6;
+    border: 1px solid #3b82f6;
+    color: #ffffff;
+}
+QPushButton#Secondary:hover { background-color: #5a98f9; }
+
+/* Icon-only Browse-folder button on the DropZone. Transparent so it sits
+   quietly inside the dotted drop area; subtle outline appears on hover so
+   it still reads as clickable. */
+QPushButton#BrowseFolder {
+    background-color: transparent;
+    border: 1px solid transparent;
+    padding: 4px;
+}
+QPushButton#BrowseFolder:hover {
+    background-color: #1f1f2e;
+    border-color: #3a3a52;
+}
+QPushButton#BrowseFolder:pressed {
+    background-color: #15151f;
+    border-color: #2a2a3a;
+}
+
+QPushButton#Danger {
+    background-color: #c0392b;
+    border: 1px solid #c0392b;
+    color: #ffffff;
+    font-weight: 600;
+    min-width: 22px; max-width: 22px;
+    min-height: 22px; max-height: 22px;
+    padding: 0;
+    border-radius: 4px;
+}
+QPushButton#Danger:hover { background-color: #e74c3c; }
+
+QPushButton#RowConvert {
+    background-color: #8b5cf6;
+    color: #ffffff;
+    border: 1px solid #8b5cf6;
+    border-radius: 6px;
+    padding: 4px 10px;
+	font-size: 8pt;
+    min-height: 22px;
+}
+QPushButton#RowConvert:hover { background-color: #9d72ff; }
+
+QPushButton#RowStop {
+    background-color: #c0392b;
+    color: #ffffff;
+    border: 1px solid #c0392b;
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-height: 22px;
+}
+QPushButton#RowStop:hover { background-color: #e74c3c; }
+
+QComboBox {
+    background-color: #1f1f2e;
+    color: #e8e8f0;
+    border: 1px solid #2a2a3a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    min-height: 20px;
+}
+QComboBox:disabled { color: #9090a0; background-color: #15151f; }
+QComboBox::drop-down { border: none; width: 18px; }
+QComboBox QAbstractItemView {
+    background-color: #15151f;
+    color: #e8e8f0;
+    border: 1px solid #2a2a3a;
+    selection-background-color: #8b5cf6;
+}
+
+QCheckBox { color: #e8e8f0; spacing: 6px; }
+QCheckBox::indicator {
+    width: 14px; height: 14px;
+    border: 1px solid #3a3a4a;
+    border-radius: 3px;
+    background-color: #15151f;
+}
+QCheckBox::indicator:checked { background-color: #8b5cf6; border-color: #8b5cf6; }
+
+QLineEdit {
+    background-color: #15151f;
+    color: #e8e8f0;
+    border: 1px solid #2a2a3a;
+    border-radius: 4px;
+    padding: 3px 8px;
+}
+
+/* StatusGlyph paints itself — no QSS needed for the per-row status indicator. */
+
+/* Topbar toggles (Philosopher's Stone, Verify Round-Trip) get a hexagon
+   indicator in place of the default square checkbox. Stone fills with the
+   muted red on check; Verify fills with the brand purple/blue. Resource
+   paths are substituted at load time by _load_stylesheet({RES} -> abs path). */
+QCheckBox#StoneToggle::indicator,
+QCheckBox#VerifyToggle::indicator {
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    border: none;
+    image: url({RES}/hex-empty.svg);
+}
+QCheckBox#StoneToggle::indicator:checked {
+    image: url({RES}/hex-filled-red.svg);
+}
+QCheckBox#VerifyToggle::indicator:checked {
+    image: url({RES}/hex-filled-purple.svg);
+}
+
+/* Philosopher's Stone "active" label: muted red text + bold. Slightly
+   brighter red than the indicator fill so the text reads on dark bg. */
+QCheckBox#StoneToggle[stoneActive="true"] {
+    color: #c0392b;
+    font-weight: 600;
+}
+
+QListWidget {
+    background-color: #0d0d15;
+    border: none;
+    outline: none;
+}
+QListWidget::item { background-color: transparent; border: none; padding: 0; margin: 0; }
+QListWidget::item:selected { background-color: #1a1a28; }
+
+QScrollBar:vertical {
+    background: #0d0d15;
+    width: 10px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #2a2a3a;
+    border-radius: 5px;
+    min-height: 24px;
+}
+QScrollBar::handle:vertical:hover { background: #3a3a4a; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+
+QStatusBar {
+    background-color: #0a0a0f;
+    color: #9090a0;
+    border-top: 1px solid #1f1f2e;
+    padding-left: 32px;
+    padding-bottom: 30px;
+}
+
+QToolTip {
+    background-color: #1f1f2e;
+    color: #e8e8f0;
+    border: 1px solid #2a2a3a;
+    padding: 4px 6px;
+}
