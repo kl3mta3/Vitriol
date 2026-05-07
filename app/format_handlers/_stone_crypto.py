@@ -97,3 +97,83 @@ def clear_key_cache() -> None:
     """Forget all cached derived keys. Call this when the user toggles
     Stone off or otherwise wants in-memory passwords gone immediately."""
     _KEY_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Streaming AES-CTR API
+# ---------------------------------------------------------------------------
+# AES-CTR is naturally streamable — each output block is independent of
+# input position. The `cryptography` library exposes this via
+# `encryptor.update(chunk)` / `decryptor.update(chunk)`. The module-level
+# `encrypt()` / `decrypt()` above wrap this for one-shot use; the
+# `StreamingEncryptor` / `StreamingDecryptor` below expose the chunked
+# API for callers that handle multi-GB plaintexts and can't afford to
+# hold the whole thing in RAM.
+#
+# IV derivation for streaming:
+#   The one-shot path computes IV = HMAC(key, plaintext)[:16]. For
+#   streaming we don't want to read the source twice solely for IV
+#   computation, so callers should accumulate the same byte sequence
+#   the one-shot would have hashed by feeding chunks to a `hmac.HMAC`
+#   incrementally before constructing the encryptor. See
+#   `derive_iv_streaming` for the helper.
+
+class StreamingEncryptor:
+    """Chunked AES-CTR encrypt. Caller feeds plaintext via `update(chunk)`
+    and receives ciphertext chunks of the same length. Wraps the native
+    `cryptography` chunked API. Single-threaded (cipher state is
+    sequential)."""
+    __slots__ = ("_enc",)
+
+    def __init__(self, key: bytes, iv: bytes) -> None:
+        cipher = Cipher(algorithms.AES(key), modes.CTR(iv),
+                         backend=default_backend())
+        self._enc = cipher.encryptor()
+
+    def update(self, data: bytes) -> bytes:
+        return self._enc.update(data)
+
+    def finalize(self) -> bytes:
+        return self._enc.finalize()
+
+
+class StreamingDecryptor:
+    """Chunked AES-CTR decrypt. Same API as `StreamingEncryptor`. NO
+    authentication check (matches the no-oracle invariant of `decrypt`)."""
+    __slots__ = ("_dec",)
+
+    def __init__(self, key: bytes, iv: bytes) -> None:
+        cipher = Cipher(algorithms.AES(key), modes.CTR(iv),
+                         backend=default_backend())
+        self._dec = cipher.decryptor()
+
+    def update(self, data: bytes) -> bytes:
+        return self._dec.update(data)
+
+    def finalize(self) -> bytes:
+        return self._dec.finalize()
+
+
+class StreamingIVHasher:
+    """Incremental HMAC-SHA256 helper that produces the SAME IV
+    `derive_iv(key, plaintext)` would, given the same byte stream fed
+    via `update()`. Caller is responsible for feeding the inner-plaintext
+    bytes in the same order the one-shot path would produce them.
+
+    Usage:
+        h = StreamingIVHasher(key)
+        h.update(inner_header)        # ext_len + ext + payload_len
+        for chunk in source_chunks:
+            h.update(chunk)
+        iv = h.iv()
+    """
+    __slots__ = ("_h",)
+
+    def __init__(self, key: bytes) -> None:
+        self._h = hmac.new(key, b"", "sha256")
+
+    def update(self, data: bytes) -> None:
+        self._h.update(data)
+
+    def iv(self) -> bytes:
+        return self._h.digest()[:_IV_LEN]

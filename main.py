@@ -13,6 +13,29 @@ from app.utils.paths import app_root, log_file, resources_dir
 from app import format_handlers
 
 
+# Stable AppUserModelID for Transmute. Without this, the Windows taskbar
+# groups our window under python.exe and shows the Python feather icon —
+# even though `app.setWindowIcon(...)` is called. Setting an explicit
+# AUMID tells Windows "this is its own app" so the taskbar icon falls
+# back to QApplication.windowIcon() instead of the launching exe's.
+# Format: <CompanyName>.<ProductName>.<SubProduct>.<Version>
+_WIN_AUMID = "Transmute.Transmute.App.1"
+
+
+def _set_windows_aumid() -> None:
+    """Tag this process with our AppUserModelID on Windows so the taskbar
+    uses our QIcon instead of python.exe's feather. No-op on non-Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_WIN_AUMID)
+    except (OSError, AttributeError):
+        # ctypes can fail in unusual environments (some sandboxes, MSYS
+        # shells); not worth crashing the app over a taskbar icon nicety.
+        pass
+
+
 def _load_stylesheet(app: QApplication) -> None:
     qss = app_root() / "theme.qss"
     if not qss.exists():
@@ -73,6 +96,10 @@ def main() -> int:
     log = get_logger()
     log.info("starting Transmute")
     _install_exception_logging(log)
+    # Must run BEFORE QApplication is created — Windows reads the AUMID
+    # of the calling process at QApplication construction time, and once
+    # the taskbar entry exists it can't be re-tagged.
+    _set_windows_aumid()
 
     app = QApplication(sys.argv)
     app.setApplicationName("Transmute")

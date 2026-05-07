@@ -227,6 +227,10 @@ class MainWindow(QMainWindow):
 
         self.playlist = Playlist()
         self.playlist.items_changed.connect(self._on_playlist_changed)
+        # Sync initial Stone-mode visual cue (red watermark) with the
+        # toggle's persisted state — the toggle was already configured
+        # above; we just need to inform the freshly-created playlist.
+        self.playlist.set_stone_active(self.chk_stone.isChecked())
         outer.addWidget(self.playlist, 1)
 
         bulk = QHBoxLayout()
@@ -368,17 +372,37 @@ class MainWindow(QMainWindow):
         # cross-category byte-passthrough hosts.
         for w in self.playlist.items():
             w.refresh_targets(masquerade=checked)
+        # Light up (or hide) the alchemical-circle watermark behind the
+        # playlist; only glows when Stone is engaged.
+        self.playlist.set_stone_active(checked)
         self._status(
             "Philosopher's Stone " + ("ON — lossless byte-passthrough hosts available."
                                       if checked else "OFF.")
         )
 
     def _refresh_stone_visuals(self) -> None:
-        """Sync the active QSS state of the Stone toggle. The hex indicator
-        carries the visual cue now — no separate icon to manage."""
+        """Sync the active QSS state of the Stone toggle. When `stoneActive`
+        is true, the toggle text renders in the same muted alchemical red
+        as the playlist's transmutation-circle watermark — visual cue that
+        Stone mode is engaged."""
         active = self.chk_stone.isChecked()
         self.chk_stone.setProperty("stoneActive", "true" if active else "false")
-        # Re-polish so the dynamic property selector kicks in.
+        # Apply the active-state QSS directly. We can't rely on a global
+        # stylesheet because the app doesn't load one; setStyleSheet on the
+        # widget is enough since the dynamic [stoneActive="true"] selector
+        # only matters for THIS specific QCheckBox.
+        if active:
+            self.chk_stone.setStyleSheet(
+                "QCheckBox#StoneToggle {"
+                " color: #c0392b;"               # muted alchemical red — matches the watermark tint
+                " font-weight: bold;"
+                "}"
+            )
+        else:
+            # Empty stylesheet → revert to default checkbox appearance.
+            self.chk_stone.setStyleSheet("")
+        # Re-polish so the dynamic property selector (and any inherited QSS)
+        # kicks in.
         self.chk_stone.style().unpolish(self.chk_stone)
         self.chk_stone.style().polish(self.chk_stone)
 

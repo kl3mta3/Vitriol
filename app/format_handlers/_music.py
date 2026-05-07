@@ -50,6 +50,16 @@ BITS_PER_SAMPLE = 16
 BYTES_PER_SAMPLE = BITS_PER_SAMPLE // 8
 PAYLOAD_BITS_PER_SAMPLE = 4              # bottom 4 bits of each sample
 PAYLOAD_BITS_PER_FRAME = PAYLOAD_BITS_PER_SAMPLE * CHANNELS  # 8 bits = 1 byte
+
+# Minimum audio duration floor: 10 seconds. Tiny payloads would otherwise
+# produce millisecond-long audio files (a 50-byte payload = 50 stereo
+# frames = 1.1 ms of audio). That's a forensic tell — a real music file
+# is never that short. The audio Stone-pack synthesizes the same chord
+# progression / drum / arpeggio system it normally would, padded to the
+# minimum length via the v3 audio envelope's `pad_to_inner` mechanism.
+# The decoder reads the inner-plaintext `payload_len` field and discards
+# the random tail, so round-trip is byte-perfect regardless of padding.
+MUSIC_MIN_FRAMES = SAMPLE_RATE * 10        # 441,000 stereo frames = 10 sec at 44.1 kHz
 # Music synthesis amplitude cap. Sized to land peaks at ≈ 50% of int16 full
 # scale (±16384), making outputs sound like normal music rather than the
 # 18 dB-quieter-than-CD dribble earlier versions produced. The bottom 4 bits
@@ -252,8 +262,10 @@ def _build_chord(root_midi: int, quality: str, voicing: int = 0) -> List[int]:
 
 def _frames_for_bytes(n_bytes: int) -> int:
     """Number of stereo frames needed to carry n_bytes of payload at 4-bit
-    embedding per channel (8 bits per stereo frame)."""
-    return n_bytes  # 1 byte per stereo frame
+    embedding per channel (8 bits per stereo frame). Always at least
+    `MUSIC_MIN_FRAMES` so very small payloads still produce a 10-second
+    audio file — see the constant's comment for the rationale."""
+    return max(MUSIC_MIN_FRAMES, n_bytes)  # 1 byte per stereo frame, floored at 10 sec
 
 
 def _synth_kick(samples_per_beat: int) -> List[int]:
