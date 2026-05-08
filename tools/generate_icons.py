@@ -1,4 +1,4 @@
-"""Render the Transmute logo SVGs into PNG sizes + multi-resolution .ico.
+"""Render the Vitriol logo SVGs into PNG sizes + multi-resolution .ico.
 
 Run once whenever any of the source SVGs changes:
     python tools/generate_icons.py

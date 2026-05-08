@@ -7,7 +7,7 @@ portrait of its source — same source always produces the same image,
 different sources land in different regions of the Mandelbrot set.
 
 This is a presentation feature, not steganography: the keystream is
-derived from public envelope dimensions. Anyone with Transmute can recover
+derived from public envelope dimensions. Anyone with Vitriol can recover
 the original source.
 
 Implementation uses NumPy for vectorized iteration, generating the full

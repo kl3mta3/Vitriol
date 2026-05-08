@@ -35,6 +35,34 @@ MEDIA_WRITE_OK: set[str] = set()              # ext -> writable by its handler
 EXT_CATEGORY: dict[str, str] = {}
 
 
+# --- Source-type policy ----------------------------------------------------
+#
+# Two related rules govern which conversions are exposed in the dropdown
+# (and enforced at conversion time as defense-in-depth). Both exist for
+# user-experience and safety reasons rather than technical limits.
+
+# Source extensions whose ONLY meaningful operation in Vitriol is Stone-mode.
+# Auto-engage Stone for these so the dropdown populates without the user
+# needing to know about the Philosopher's Stone toggle. There's no non-Stone
+# path that does anything useful with these files:
+#   .zip — only handled as a transparent Stone archive (member named original.*)
+#   .exe — Vitriol has no decompiler / regular-binary handling; only Stone .exe
+STONE_ONLY_SOURCES = {".zip", ".exe"}
+
+# Extensions that auto-execute on extraction (a Stone .py runs Python code;
+# a Stone .exe runs native code). The four combinations where BOTH source
+# AND target are in this set are BLOCKED to prevent the tool from being
+# trivially used to ship malware:
+#   .py  -> .py    no nesting / re-wrap (pure obfuscation, no legitimate use)
+#   .py  -> .exe   Python-as-exe trojan (single-click malware delivery)
+#   .exe -> .py    exe-as-Python trojan (same in reverse)
+#   .exe -> .exe   no nesting / re-wrap
+# All other combinations remain valid. Notably .zip -> .py / .zip -> .exe
+# stay allowed: zip contents are opaque to Stone and the user must manually
+# unzip after extraction (manual step = safety boundary).
+AUTO_EXECUTE_EXTS = {".py", ".exe"}
+
+
 def _register_module(mod) -> None:
     name = mod.__name__.split(".")[-1]
     media_cat = getattr(mod, "MEDIA_CATEGORY", None)
@@ -98,10 +126,26 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
     When `masquerade` is True, also include the byte-passthrough host targets
     (WAV, PNG, BMP, TXT) so the user can hide any source inside a lossless
     container.
+
+    Source-type policy applied here:
+      - If `src_ext` is in `STONE_ONLY_SOURCES` ({.zip, .exe}), Stone is
+        auto-engaged regardless of the `masquerade` arg, since these
+        sources have no non-Stone meaning in Vitriol.
+      - If `src_ext` is in `AUTO_EXECUTE_EXTS` ({.py, .exe}), the .py and
+        .exe extensions are filtered out of the Stone extras to block the
+        four malware-delivery combinations (.py->.py, .py->.exe,
+        .exe->.py, .exe->.exe). See the constants above for rationale.
     """
     src_ext = src_ext.lower()
     if not src_ext.startswith("."):
         src_ext = "." + src_ext
+
+    # Auto-engage Stone for sources that have no non-Stone operation.
+    # These sources would otherwise show an empty dropdown ("No conversion
+    # targets registered"), forcing the user to know about the Stone
+    # toggle before doing anything with them.
+    if src_ext in STONE_ONLY_SOURCES:
+        masquerade = True
 
     # Philosopher's Stone extras: any *lossless* source can be embedded into
     # any Stone host. Lossy sources (jpg, mp3, mp4, etc.) are excluded so the
@@ -114,6 +158,14 @@ def valid_targets_for(src_ext: str, masquerade: bool = False) -> list[str]:
                 extras = {e for e in _msq.TARGETS if e != src_ext}
         except ImportError:
             extras = set()
+
+    # Malware-pipeline guard: when the source is an auto-execute format
+    # (.py or .exe), strip .py and .exe from the Stone target set. This
+    # blocks the four auto-execute -> auto-execute combinations at the
+    # dropdown layer. The router enforces the same rule independently as
+    # defense-in-depth.
+    if src_ext in AUTO_EXECUTE_EXTS:
+        extras = {e for e in extras if e not in AUTO_EXECUTE_EXTS}
 
     # Media: stay in the same category (image-to-image, audio-to-audio,
     # video-to-video, model-to-model). Cross-category targets (image→pdf,

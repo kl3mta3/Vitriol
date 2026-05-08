@@ -239,7 +239,7 @@ def image_bytes_to_textdoc(src_bytes: bytes, src_ext: str, alt: str = "") -> Tex
     """Wrap a raster image as a single-block TextDoc. Used by the router
     when the source is an image and the target is a document format.
 
-    Sets `_transmute_origin` in the TextDoc metadata so reversibility-aware
+    Sets `_vitriol_origin` in the TextDoc metadata so reversibility-aware
     writers (pdf_write, docx_handler, epub_handler) can stash the original
     source bytes alongside the rendered output (PDF trailer / DOCX ZIP entry).
     Lets PNG -> PDF -> PNG round-trip byte-perfect.
@@ -249,5 +249,5 @@ def image_bytes_to_textdoc(src_bytes: bytes, src_ext: str, alt: str = "") -> Tex
         ext = "." + ext
     mime = _EXT_TO_MIME.get(ext, "image/png")
     doc = TextDoc(blocks=[Image(data=src_bytes, mime=mime, alt=alt or f"image{ext}")])
-    doc.metadata["_transmute_origin"] = {"bytes": src_bytes, "ext": ext}
+    doc.metadata["_vitriol_origin"] = {"bytes": src_bytes, "ext": ext}
     return doc

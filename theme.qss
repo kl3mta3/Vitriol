@@ -1,4 +1,4 @@
-/* Transmute — dark theme */
+/* Vitriol — dark theme */
 
 QMainWindow, QWidget {
     background-color: #0a0a0f;

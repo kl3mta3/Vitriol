@@ -1,4 +1,4 @@
-"""Transmute — launcher.
+"""Vitriol — launcher.
 
 Designed to be packaged as a small PyInstaller --onedir bundle (~30 MB) with
 its own embedded Python, separate from the main app. End users only ever run
@@ -60,12 +60,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app.utils import paths as _paths   # noqa: E402
 
 ROOT = _paths.app_root()
-BIN = _paths.bin_dir()                  # %LOCALAPPDATA%/Transmute/bin
+BIN = _paths.bin_dir()                  # %LOCALAPPDATA%/Vitriol/bin
 WHEELS = _paths.wheels_dir()            # <app>/wheels (read-only, may not exist)
 RESOURCES = _paths.resources_dir()      # <app>/resources (bundled, read-only)
-FONTS = _paths.font_dir()               # %LOCALAPPDATA%/Transmute/fonts
+FONTS = _paths.font_dir()               # %LOCALAPPDATA%/Vitriol/fonts
 HW_CACHE = _paths.hw_encoder_cache()    # bin_dir()/hw_encoders.json
-USER_DATA = _paths.user_data_dir()      # %LOCALAPPDATA%/Transmute
+USER_DATA = _paths.user_data_dir()      # %LOCALAPPDATA%/Vitriol
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +140,7 @@ DEJAVU_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/ver
 DEJAVU_SHA = ""
 
 # Cinzel — OFL-licensed engraved-cap serif from Google Fonts. Used for the
-# "Transmute" title only. The repo only ships the variable font now —
+# "Vitriol" title only. The repo only ships the variable font now —
 # brackets must be URL-encoded.
 CINZEL_URL = "https://github.com/google/fonts/raw/main/ofl/cinzel/Cinzel%5Bwght%5D.ttf"
 CINZEL_SHA = ""
@@ -169,7 +169,7 @@ def _download(url: str, dst: Path, expected_sha: str, log) -> bool:
     tmp = dst.with_suffix(dst.suffix + ".part")
     hasher = hashlib.sha256()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Transmute/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Vitriol/0.1"})
         with urllib.request.urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
             total = int(resp.headers.get("Content-Length") or 0)
             seen = 0
@@ -378,10 +378,10 @@ class _ProgressUI:
         except tk.TclError:
             self.root = None
             return
-        self.root.title("Transmute")
+        self.root.title("Vitriol")
         self.root.geometry("620x320")
         self.root.configure(bg="#15151f")
-        title = tk.Label(self.root, text="Transmute — Starting up",
+        title = tk.Label(self.root, text="Vitriol — Starting up",
                          fg="#e8e8f0", bg="#15151f", font=("Segoe UI", 13, "bold"))
         title.pack(pady=(14, 8), padx=14, anchor="w")
         sub = tk.Label(self.root,
@@ -422,7 +422,7 @@ class _ProgressUI:
 def main() -> int:
     ui = _ProgressUI()
     try:
-        # 0. First-run scaffold: create AppData/Transmute, Documents/Transmute,
+        # 0. First-run scaffold: create AppData/Vitriol, Documents/Vitriol,
         #    and per-category output subfolders. Idempotent — safe on every run.
         _paths.ensure_user_dirs()
         ui.log(f"User data:  {_paths.user_data_dir()}")
@@ -476,7 +476,7 @@ def main() -> int:
         runtime_env["UC_ASSIMP_DIR"] = str(ai.parent)
 
     if getattr(sys, "frozen", False):
-        # PyInstaller bundle. sys.executable points at Transmute.exe and
+        # PyInstaller bundle. sys.executable points at Vitriol.exe and
         # cannot run arbitrary .py files via subprocess, so we import
         # main and call it in-process. All Python deps were bundled at
         # build time so the pip-install step earlier was a no-op.

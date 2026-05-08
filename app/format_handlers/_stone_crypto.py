@@ -20,7 +20,7 @@ Why PBKDF2-200k: makes brute-forcing a weak password measurably
 expensive (~50 ms per attempt). Empty password ("default key") still
 passes through PBKDF2 — the resulting key is reproducible by anyone
 with the source, which is fine because default-key files are the
-"public" tier (anyone with Transmute can decode, same as today).
+"public" tier (anyone with Vitriol can decode, same as today).
 """
 from __future__ import annotations
 import hashlib
@@ -46,7 +46,7 @@ def derive_key(password: bytes) -> bytes:
     """Derive a 32-byte AES-256 key from the password via PBKDF2-HMAC-SHA256.
 
     Empty password is allowed and produces a deterministic "default key"
-    that is identical across all installs of the same Transmute version.
+    that is identical across all installs of the same Vitriol version.
     """
     if not isinstance(password, (bytes, bytearray)):
         raise TypeError("password must be bytes")

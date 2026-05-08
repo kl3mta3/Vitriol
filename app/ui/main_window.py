@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
 
 from ..utils.paths import resources_dir
 from ..utils.logger import get_logger
+from ..__version__ import __version__
 
 _log = get_logger()
 _CINZEL_FAMILY: str | None = None
@@ -132,7 +133,7 @@ def _help_icon(tooltip_text: str) -> QLabel:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Transmute")
+        self.setWindowTitle("Vitriol")
         self.resize(1180, 720)
 
         self._queue = ConversionQueue(max_workers=3, parent=self)
@@ -165,8 +166,11 @@ class MainWindow(QMainWindow):
         title_icon = _logo_label(38, boost=True)
         if title_icon is not None:
             title_box.addWidget(title_icon)
-        title = QLabel("Transmute")
+        title = QLabel("Vitriol")
         title.setObjectName("AppTitle")
+        # Hover tooltip surfaces the version — lightweight "About"
+        # affordance without adding a menu bar.
+        title.setToolTip(f"Vitriol {__version__}")
         # Apply Cinzel (engraved-cap serif) to the title only — the rest of
         # the UI keeps its sans-serif. Slight letter-spacing for the classical
         # carved-capital feel.

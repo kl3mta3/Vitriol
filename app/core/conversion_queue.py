@@ -87,7 +87,7 @@ class _Runnable(QRunnable):
                     return
 
         ticker_thread = threading.Thread(target=_ticker, daemon=True,
-                                          name=f"transmute-ticker-{job.id}")
+                                          name=f"vitriol-ticker-{job.id}")
         ticker_thread.start()
 
         def emit_bytes(p: float) -> None:

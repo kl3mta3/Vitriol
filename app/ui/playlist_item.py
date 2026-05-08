@@ -175,7 +175,8 @@ class PlaylistItemWidget(QWidget):
         self._set_save_field_path(str(self._default_save_dir()))
         layout.addWidget(self.save_field, 1)
 
-        # 8. Transmute / Stop button
+        # 8. Transmute / Stop button. "Transmute" is the verb (the action
+        # the button performs) — Vitriol the product transmutes the file.
         self.convert_btn = QPushButton("Transmute")
         self.convert_btn.setObjectName("RowConvert")
         self.convert_btn.clicked.connect(self._on_convert_or_stop)
@@ -242,7 +243,7 @@ class PlaylistItemWidget(QWidget):
 
     def stone_password(self) -> bytes:
         """The user-set per-row Stone password. Empty bytes means use the
-        default app key (still encrypted, anyone with Transmute can decode).
+        default app key (still encrypted, anyone with Vitriol can decode).
         Held in widget memory only; never persisted."""
         return self._stone_password
 
@@ -279,6 +280,13 @@ class PlaylistItemWidget(QWidget):
         # Zip targets never encrypt — hide the icon regardless of category.
         if dst == ".zip":
             return False
+        # STONE_ONLY_SOURCES (.zip, .exe) have no "same-type" doc category
+        # in any meaningful sense — every conversion FROM them is inherently
+        # transformative and engages encryption. Treat them as cross-type
+        # whenever the destination differs (which it always will at this
+        # point — same-ext .zip→.zip / .exe→.exe is filtered out elsewhere).
+        if src in fh.STONE_ONLY_SOURCES and src != dst:
+            return True
         # Non-media exts collapse to "doc"; matches the router's
         # _is_cross_category logic so the UI gate stays in sync.
         src_cat = fh.MEDIA_CATEGORY_OF.get(src, "doc")
@@ -286,11 +294,20 @@ class PlaylistItemWidget(QWidget):
         return src_cat != dst_cat
 
     def _refresh_stone_lock_visibility(self) -> None:
-        """Show the lock icon only when Stone is on AND this row is a
+        """Show the lock icon only when Stone is engaged AND this row is a
         cross-type conversion. Clears any stored password when the row
         turns same-type — a leftover password would never apply, since
-        same-type Stone uses plaintext envelopes."""
-        visible = self._masquerade and self._is_cross_type_row()
+        same-type Stone uses plaintext envelopes.
+
+        "Stone is engaged" means either the global toggle is on OR the
+        source extension is in STONE_ONLY_SOURCES (.zip, .exe), since
+        those auto-engage Stone in `valid_targets_for` and the router.
+        Without this OR-clause, the lock icon would stay hidden when the
+        user adds a .zip with the global Stone toggle OFF — even though
+        the actual conversion runs through Stone and supports a password."""
+        src = self.src_ext.lower()
+        stone_engaged = self._masquerade or src in fh.STONE_ONLY_SOURCES
+        visible = stone_engaged and self._is_cross_type_row()
         self.stone_lock_btn.setVisible(visible)
         if not visible and self._stone_password:
             self._stone_password = b""

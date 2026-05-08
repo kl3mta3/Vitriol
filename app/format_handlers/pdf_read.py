@@ -39,7 +39,7 @@ def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
     pdfminer can't be imported (e.g. user ran main.py before the launcher's
     pip install completed).
 
-    Trailer-envelope fast path: if the PDF was produced by Transmute from
+    Trailer-envelope fast path: if the PDF was produced by Vitriol from
     an off-type source (e.g. PNG -> PDF), the original source bytes are
     appended after %%EOF as a UCMSv1 envelope. Recover those directly so
     the round-trip is byte-perfect with no quality loss from re-extraction.
@@ -118,7 +118,7 @@ def _try_read_trailer_envelope(path: Path) -> Optional[tuple[bytes, str]]:
 def _wrap_recovered_origin(payload: bytes, src_ext: str) -> TextDoc:
     """Wrap recovered original-source bytes as a TextDoc the router can
     forward to any image writer (or onward Stone host) without losing
-    bytes. The metadata's `_transmute_origin` lets a downstream PDF write
+    bytes. The metadata's `_vitriol_origin` lets a downstream PDF write
     re-emit the trailer if the user does PDF -> PDF conversion."""
     from ..core.intermediate import _EXT_TO_MIME
     ext = src_ext.lower()
@@ -126,7 +126,7 @@ def _wrap_recovered_origin(payload: bytes, src_ext: str) -> TextDoc:
         ext = "." + ext
     mime = _EXT_TO_MIME.get(ext, "application/octet-stream")
     doc = TextDoc(blocks=[Image(data=payload, mime=mime, alt=f"image{ext}")])
-    doc.metadata["_transmute_origin"] = {"bytes": payload, "ext": ext}
+    doc.metadata["_vitriol_origin"] = {"bytes": payload, "ext": ext}
     return doc
 
 

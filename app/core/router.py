@@ -35,9 +35,9 @@ def _try_trailer_envelope(src: Path, src_ext: str):
         try:
             import zipfile
             with zipfile.ZipFile(src) as z:
-                if "_transmute/original.bin" in z.namelist():
+                if "_vitriol/original.bin" in z.namelist():
                     from ..format_handlers.masquerade import _parse_envelope
-                    return _parse_envelope(z.read("_transmute/original.bin"))
+                    return _parse_envelope(z.read("_vitriol/original.bin"))
         except (zipfile.BadZipFile, KeyError, ValueError, OSError):
             return None
     return None
@@ -74,6 +74,39 @@ def convert_file(
     if warnings is None:
         warnings = []
 
+    # --- Source-type policy enforcement -----------------------------------
+    # See `app/format_handlers/__init__.py` STONE_ONLY_SOURCES and
+    # AUTO_EXECUTE_EXTS for the rationale. The dropdown filter in
+    # `valid_targets_for` enforces these rules at UI time; we re-enforce
+    # here as defense-in-depth so a programmatic caller (or a future
+    # caller that bypasses the UI) can't bypass the policy.
+
+    # Block auto-execute -> auto-execute conversions (.py/.exe both ends).
+    # This is the malware-pipeline guard. Wrapping a Python payload as a
+    # self-extracting .exe (or vice versa) produces a single-click
+    # auto-runner, which Vitriol must not enable. .zip, image, audio, etc.
+    # remain valid sources for .py / .exe targets because their contents
+    # don't auto-execute on extraction (the user must take a manual step).
+    if src_ext in fh.AUTO_EXECUTE_EXTS and dst_ext in fh.AUTO_EXECUTE_EXTS:
+        # ASCII-only message (no unicode arrows or em-dashes) so the error
+        # renders correctly when shown in legacy Windows consoles (cp1252)
+        # via crash dumps, log files, or `print(exc)` from a CLI invoker.
+        raise UnsupportedConversionError(
+            f"Vitriol does not allow {src_ext} -> {dst_ext} conversions. "
+            ".py and .exe cannot be both the source AND target of the "
+            "same conversion -- this would let the tool be used as a "
+            "malware-wrapping pipeline. Convert your source to a non-"
+            "executable Stone host first (.zip / .png / .wav / etc.), "
+            "then convert that to your final target if needed."
+        )
+
+    # Auto-engage Stone for sources whose only meaningful operation is
+    # Stone-mode (currently .zip and .exe). Without this, a programmatic
+    # caller passing masquerade=False with a .zip source would fail
+    # downstream — Vitriol has no non-Stone path for these formats.
+    if src_ext in fh.STONE_ONLY_SOURCES:
+        masquerade = True
+
     # Disk-space sanity check (cheap, no popup — just a status-bar hint).
     try:
         src_size = src.stat().st_size
@@ -89,7 +122,7 @@ def convert_file(
         src_size = 0
 
     # Trailer-envelope round-trip short-circuit. If the source is a doc
-    # format (PDF / DOCX / EPUB) that carries a Transmute trailer envelope
+    # format (PDF / DOCX / EPUB) that carries a Vitriol trailer envelope
     # AND the target is a media format, recover the original source bytes
     # directly from the trailer. This makes PNG -> PDF -> PNG byte-perfect
     # WITHOUT requiring the Stone toggle, and supersedes both the Stone
@@ -226,14 +259,14 @@ def convert_file(
     # succeed and be recoverable. So for doc → media we auto-engage the
     # Stone envelope when the destination is a Stone host (PNG/BMP/WAV/MKV):
     # the source bytes are embedded into a valid container of the target
-    # type, and converting back through Transmute extracts the original.
+    # type, and converting back through Vitriol extracts the original.
     if not media_src and media_dst:
         from ..format_handlers import masquerade as _msq
         if _msq.can_embed_into(dst_ext) and not _msq.is_lossy(src_ext):
             warnings.append(
                 f"{src_ext} → {dst_ext} has no semantic conversion path; "
                 "embedded the source via Philosopher's Stone. Convert the "
-                "output back through Transmute to recover the original."
+                "output back through Vitriol to recover the original."
             )
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
                          cross_category=_is_cross_category(src_ext, dst_ext),
@@ -288,7 +321,7 @@ def convert_file(
             warnings.append(
                 "File too large for direct conversion and handler cannot "
                 "stream — used byte-masquerade as fallback. Output is "
-                "byte-perfect but only round-trips through Transmute."
+                "byte-perfect but only round-trips through Vitriol."
             )
             _msq.convert(src, dst, src_ext, dst_ext, cancel, progress,
                          cross_category=_is_cross_category(src_ext, dst_ext),

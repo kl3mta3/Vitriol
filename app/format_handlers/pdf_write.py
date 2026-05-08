@@ -84,7 +84,7 @@ class _PdfWriter:
         # multiple times reuse one /XObject instead of duplicating data.
         self._image_xobject_cache: dict[int, int] = {}
         # Trailer envelope source — populated by render() from doc.metadata
-        # ["_transmute_origin"]. When set, save() appends a UCMSv1 envelope
+        # ["_vitriol_origin"]. When set, save() appends a UCMSv1 envelope
         # of the original source bytes after the PDF's %%EOF marker so the
         # original file (e.g. the source PNG) can be recovered byte-perfect.
         self._origin: Optional[dict] = None
@@ -110,7 +110,7 @@ class _PdfWriter:
         # Capture the trailer-envelope origin if the IR adapter set one.
         meta = getattr(doc, "metadata", None)
         if isinstance(meta, dict):
-            origin = meta.get("_transmute_origin")
+            origin = meta.get("_vitriol_origin")
             if isinstance(origin, dict) and "bytes" in origin and "ext" in origin:
                 self._origin = origin
         for blk in doc.blocks:

@@ -1,7 +1,7 @@
-# Transmute
+# Vitriol
 
 <p align="center">
-  <img src="resources/icons/logo-256.png" alt="Transmute" width="160"/>
+  <img src="resources/icons/logo-256.png" alt="Vitriol" width="160"/>
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 
 ## What it does
 
-Transmute converts files between formats across five categories:
+Vitriol converts files between formats across five categories:
 
 - **Text** — txt, md, html, json, xml, yaml, ini, log, csv, tsv, xlsx, docx, pdf, epub, rtf, pptx, odt
 - **Images** — png, jpg, webp, bmp, tiff, gif, ico, tga, ppm/pgm/pbm, dds, heic, svg
@@ -71,11 +71,11 @@ Both features preserve byte-perfect round-trip. Same-category Stone (e.g. `.png 
 
 ### Stone encryption (per-row password)
 
-Every Stone PNG/BMP is **encrypted with AES-256-CTR**. With no user password, files use a built-in app-wide key — anyone with Transmute can decode them (same exposure level as the older non-encrypted Stone). With a user password set on a row (via the 🔓/🔒 lock icon next to the save-path field), only the same password decodes the file.
+Every Stone PNG/BMP is **encrypted with AES-256-CTR**. With no user password, files use a built-in app-wide key — anyone with Vitriol can decode them (same exposure level as the older non-encrypted Stone). With a user password set on a row (via the 🔓/🔒 lock icon next to the save-path field), only the same password decodes the file.
 
-The round-trip is purely mechanical: `WAV1 + "paper" → PNG1`, then `PNG1 + "paper" → WAV2` produces `WAV2 == WAV1` byte-for-byte. **Wrong password produces garbage output silently** — there is no "incorrect password" message, and Transmute does not detect that encryption was used. The format itself is the only key. Every Stone file looks structurally identical to every other Stone file; the bytes don't reveal which use a password and which don't.
+The round-trip is purely mechanical: `WAV1 + "paper" → PNG1`, then `PNG1 + "paper" → WAV2` produces `WAV2 == WAV1` byte-for-byte. **Wrong password produces garbage output silently** — there is no "incorrect password" message, and Vitriol does not detect that encryption was used. The format itself is the only key. Every Stone file looks structurally identical to every other Stone file; the bytes don't reveal which use a password and which don't.
 
-**Forgetting a password means the file is unrecoverable.** Transmute does not store, log, or persist passwords. They live in widget memory only and are forgotten when the row is removed or Stone mode is toggled off.
+**Forgetting a password means the file is unrecoverable.** Vitriol does not store, log, or persist passwords. They live in widget memory only and are forgotten when the row is removed or Stone mode is toggled off.
 
 **Verify Round-Trip** (only available with Philosopher's Stone on). After each conversion, immediately runs the reverse direction into a temp folder, hashes both files, and only commits the output if `sha256(reverse(forward(src))) == sha256(src)`. The temp folder is cleaned up on success, on verification failure, and on app exit.
 
@@ -126,7 +126,7 @@ output/                        # Default output directories per category
 
 - **Theme** — edit `theme.qss`. The `{RES}` placeholder is substituted with the absolute path to `resources/` at load time, so QSS rules can reference SVG assets via `image: url({RES}/...)`.
 - **Hardware encoders** — automatic. The result of `ffmpeg -encoders` is cached at `bin/hw_encoders.json` and refreshed whenever the FFmpeg binary's mtime changes. No UI toggle.
-- **Settings** — persisted at `%LOCALAPPDATA%/Transmute/settings.json` on Windows. Currently tracks the two top-bar toggles.
+- **Settings** — persisted at `%LOCALAPPDATA%/Vitriol/settings.json` on Windows. Currently tracks the two top-bar toggles.
 - **Logo** — edit `resources/logo.svg`, then re-run `python tools/generate_icons.py` to regenerate the PNG sizes and `.ico`.
 
 ## Scope notes

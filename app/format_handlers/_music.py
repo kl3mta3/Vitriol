@@ -33,7 +33,7 @@ derived from SHA-256 of the bit-packed input bytes. Same source always
 produces the same music.
 
 This is a presentation feature, not steganography. The payload is
-recoverable through Transmute via the symmetric decoder.
+recoverable through Vitriol via the symmetric decoder.
 """
 from __future__ import annotations
 import hashlib

@@ -1,9 +1,9 @@
-"""Rebuild Transmute.exe (the launcher.py wrapper).
+"""Rebuild Vitriol.exe (the launcher.py wrapper).
 
-Output goes to the repo root: <repo>/Transmute.exe.
+Output goes to the repo root: <repo>/Vitriol.exe.
 
 Run from anywhere:
-    python tools/build_transmute_exe.py
+    python tools/build_vitriol_exe.py
 
 Requires PyInstaller (`pip install pyinstaller`).
 
@@ -20,9 +20,9 @@ from pathlib import Path
 
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent
-    stub = repo / "tools" / "transmute_stub.py"
+    stub = repo / "tools" / "vitriol_stub.py"
     icon = repo / "resources" / "icons" / "logo.ico"
-    final_exe = repo / "Transmute.exe"
+    final_exe = repo / "Vitriol.exe"
     dist = repo / "dist_stub"
     work = repo / "build_stub"
 
@@ -42,7 +42,7 @@ def main() -> int:
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--windowed",
-        "--name", "Transmute",
+        "--name", "Vitriol",
         "--icon", str(icon),
         "--distpath", str(dist),
         "--workpath", str(work),
@@ -56,13 +56,13 @@ def main() -> int:
         print("PyInstaller failed.", file=sys.stderr)
         return rc
 
-    built = dist / "Transmute.exe"
+    built = dist / "Vitriol.exe"
     if not built.exists():
         print(f"build did not produce {built}", file=sys.stderr)
         return 2
 
     shutil.copy2(built, final_exe)
-    print(f"\nTransmute.exe -> {final_exe}")
+    print(f"\nVitriol.exe -> {final_exe}")
     print(f"Size: {final_exe.stat().st_size / (1024 * 1024):.1f} MB")
 
     # Clean up build artifacts

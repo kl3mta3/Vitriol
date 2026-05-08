@@ -1,4 +1,4 @@
-; Inno Setup script for Transmute.
+; Inno Setup script for Vitriol.
 ;
 ; Compile via:
 ;     python tools/build_installer.py
@@ -6,10 +6,10 @@
 ;
 ; Pre-requisites on the build host:
 ;   - Inno Setup 6+ installed (https://jrsoftware.org/isdl.php).
-;   - dist/Transmute/ already built via tools/build_transmute_dist.py
-;     (the PyInstaller folder containing Transmute.exe + _internal/).
+;   - dist/Vitriol/ already built via tools/build_vitriol_dist.py
+;     (the PyInstaller folder containing Vitriol.exe + _internal/).
 ;
-; Output: dist/TransmuteSetup-{AppVersion}.exe
+; Output: dist/VitriolSetup-{AppVersion}.exe
 ;
 ; The setup.exe is unsigned by default — Windows SmartScreen will warn
 ; the user on first run. Code-signing with an EV cert is a separate
@@ -19,12 +19,12 @@
   #define AppVersion "0.0.0"
 #endif
 
-#define AppName       "Transmute"
-#define AppPublisher  "Transmute"
-#define AppExeName    "Transmute.exe"
+#define AppName       "Vitriol"
+#define AppPublisher  "Equivalent Exchange"
+#define AppExeName    "Vitriol.exe"
 ; Stable AppId (GUID). Inno uses this to identify the install across
 ; versions for upgrade / uninstall. Generate ONCE per app, never change.
-#define AppId         "{{8E5F1C2A-A77B-4A0C-9DCC-3F6B17A4E8D1}"
+#define AppId         "{{A50D8473-9AD2-43E5-92C8-8469E547244F}"
 
 [Setup]
 AppId={#AppId}
@@ -43,8 +43,11 @@ ArchitecturesInstallIn64BitMode=x64
 ArchitecturesAllowed=x64
 PrivilegesRequired=admin
 OutputDir=..\dist
-OutputBaseFilename=TransmuteSetup-{#AppVersion}
+OutputBaseFilename=VitriolSetup-{#AppVersion}
 SetupIconFile=..\resources\icons\logo.ico
+; Show the Elastic License v2 as a wizard page that the user must accept
+; before installation proceeds. Path is relative to this .iss file (in tools/).
+LicenseFile=..\LICENSE
 WizardStyle=modern
 ShowLanguageDialog=no
 
@@ -55,10 +58,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: unchecked
 
 [Files]
-; Ship the entire dist/Transmute/ tree. Source paths are relative to
+; Ship the entire dist/Vitriol/ tree. Source paths are relative to
 ; this .iss file (which lives in tools/). recursesubdirs picks up
 ; _internal/ and everything under it.
-Source: "..\dist\Transmute\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Vitriol\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"

@@ -26,7 +26,7 @@ _STONE_RED = QColor("#c0392b")
 # as decoration regardless of mode, and the glow alone signals
 # "alchemy is engaged."
 _WM_OPACITY_LOGO     = 0.18    # constant logo opacity, never changes
-_WM_OPACITY_GLOW_ON  = 0.66    # bright halo so it clearly reads behind the logo
+_WM_OPACITY_GLOW_ON  = 0.79    # bright halo so it clearly reads behind the logo
 # Glow blur radius (px). Controls how far the halo extends past the
 # logo's bounding box. The glow pixmap canvas is sized at side + 2*radius
 # so the blur doesn't clip at the boundary. 40 px gives a wide soft halo

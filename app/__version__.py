@@ -1,4 +1,4 @@
-"""Single source of truth for Transmute's version string.
+"""Single source of truth for Vitriol's version string.
 
 Used by:
   - The Inno Setup installer (`tools/build_installer.py` reads this and

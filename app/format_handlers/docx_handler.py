@@ -64,26 +64,26 @@ R_NS = NS["r"]
 def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
     with zipfile.ZipFile(path) as z:
         cancel.check()
-        # Trailer-envelope fast path: if this DOCX was produced by Transmute
+        # Trailer-envelope fast path: if this DOCX was produced by Vitriol
         # from an off-type source (e.g. PNG -> DOCX), the original source
-        # bytes live in _transmute/original.bin. Recovering directly from
+        # bytes live in _vitriol/original.bin. Recovering directly from
         # there gives byte-perfect round-trip.
-        if "_transmute/original.bin" in z.namelist():
+        if "_vitriol/original.bin" in z.namelist():
             try:
                 from .masquerade import _parse_envelope
-                payload, src_ext = _parse_envelope(z.read("_transmute/original.bin"))
+                payload, src_ext = _parse_envelope(z.read("_vitriol/original.bin"))
                 from ..core.intermediate import _EXT_TO_MIME
                 ext_n = src_ext.lower()
                 if not ext_n.startswith("."):
                     ext_n = "." + ext_n
                 mime = _EXT_TO_MIME.get(ext_n, "application/octet-stream")
                 doc = TextDoc(blocks=[Image(data=payload, mime=mime, alt=f"image{ext_n}")])
-                doc.metadata["_transmute_origin"] = {"bytes": payload, "ext": ext_n}
+                doc.metadata["_vitriol_origin"] = {"bytes": payload, "ext": ext_n}
                 return doc
             except (ValueError, KeyError, ImportError) as e:
                 from ..utils.logger import get_logger
                 get_logger().warning(
-                    "DOCX trailer envelope present at _transmute/original.bin "
+                    "DOCX trailer envelope present at _vitriol/original.bin "
                     "but unreadable (%s); falling back to normal extraction.", e)
         document_xml = z.read("word/document.xml")
         try:
@@ -330,10 +330,10 @@ def write(doc, path: Path, ext: str, cancel: CancellationToken) -> None:
         # outside the [Content_Types] / relationships graph, so the entry
         # is invisible to viewers but lets docx_handler.read recover the
         # original source byte-perfect.
-        origin = doc.metadata.get("_transmute_origin") if isinstance(doc.metadata, dict) else None
+        origin = doc.metadata.get("_vitriol_origin") if isinstance(doc.metadata, dict) else None
         if isinstance(origin, dict) and "bytes" in origin and "ext" in origin:
             from .masquerade import _build_envelope
-            z.writestr("_transmute/original.bin",
+            z.writestr("_vitriol/original.bin",
                        _build_envelope(origin["bytes"], origin["ext"]),
                        compress_type=zipfile.ZIP_STORED)
 

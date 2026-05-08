@@ -50,22 +50,22 @@ def read(path: Path, ext: str, cancel: CancellationToken) -> TextDoc:
         cancel.check()
         # Trailer-envelope fast path: same scheme as docx_handler. Lets
         # PNG -> EPUB -> PNG round-trip byte-perfect.
-        if "_transmute/original.bin" in z.namelist():
+        if "_vitriol/original.bin" in z.namelist():
             try:
                 from .masquerade import _parse_envelope
-                payload, src_ext = _parse_envelope(z.read("_transmute/original.bin"))
+                payload, src_ext = _parse_envelope(z.read("_vitriol/original.bin"))
                 from ..core.intermediate import _EXT_TO_MIME, Image
                 ext_n = src_ext.lower()
                 if not ext_n.startswith("."):
                     ext_n = "." + ext_n
                 mime = _EXT_TO_MIME.get(ext_n, "application/octet-stream")
                 doc = TextDoc(blocks=[Image(data=payload, mime=mime, alt=f"image{ext_n}")])
-                doc.metadata["_transmute_origin"] = {"bytes": payload, "ext": ext_n}
+                doc.metadata["_vitriol_origin"] = {"bytes": payload, "ext": ext_n}
                 return doc
             except (ValueError, KeyError, ImportError) as e:
                 from ..utils.logger import get_logger
                 get_logger().warning(
-                    "EPUB trailer envelope present at _transmute/original.bin "
+                    "EPUB trailer envelope present at _vitriol/original.bin "
                     "but unreadable (%s); falling back to normal extraction.", e)
         # Find OPF via container.xml
         try:
@@ -190,11 +190,11 @@ def write(doc, path: Path, ext: str, cancel: CancellationToken) -> None:
             z.writestr(f"OEBPS/{fname}", xhtml, zipfile.ZIP_DEFLATED)
         # Off-type round-trip trailer envelope (same scheme as docx_handler).
         # Stash original source bytes in a private ZIP entry outside the OPF
-        # manifest so EPUB readers ignore it but Transmute can recover it.
-        origin = doc.metadata.get("_transmute_origin") if isinstance(doc.metadata, dict) else None
+        # manifest so EPUB readers ignore it but Vitriol can recover it.
+        origin = doc.metadata.get("_vitriol_origin") if isinstance(doc.metadata, dict) else None
         if isinstance(origin, dict) and "bytes" in origin and "ext" in origin:
             from .masquerade import _build_envelope
-            z.writestr("_transmute/original.bin",
+            z.writestr("_vitriol/original.bin",
                        _build_envelope(origin["bytes"], origin["ext"]),
                        compress_type=zipfile.ZIP_STORED)
 

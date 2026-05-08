@@ -33,7 +33,7 @@ def download_with_progress(
     progress = progress or (lambda p: None)
     _log.info("downloading %s -> %s", url, dst)
 
-    req = urllib.request.Request(url, headers={"User-Agent": "Transmute/0.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Vitriol/0.1"})
     hasher = hashlib.sha256()
     total = 0
     expected_total = 0

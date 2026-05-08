@@ -1,6 +1,6 @@
-"""Tiny native-EXE wrapper for Transmute.
+"""Tiny native-EXE wrapper for Vitriol.
 
-This script is the entry point packaged into Transmute.exe via PyInstaller.
+This script is the entry point packaged into Vitriol.exe via PyInstaller.
 Its only job: locate a real Python interpreter on the user's system, then
 hand control to launcher.py. The launcher itself uses `sys.executable` to
 run `pip install` for first-run dependencies, which only works against a
@@ -10,7 +10,7 @@ points back at itself).
 So the design is:
   1. Find Python (py.exe → python.exe → python3.exe in PATH; user-supplied
      UC_PYTHON env var as override).
-  2. Find launcher.py next to the .exe (same dir as Transmute.exe in the
+  2. Find launcher.py next to the .exe (same dir as Vitriol.exe in the
      portable ZIP / git clone) or up one dir (when this script is being
      invoked from `tools/` during development).
   3. Spawn `<found-python> launcher.py <forwarded args>` and exit with
@@ -28,14 +28,14 @@ from pathlib import Path
 
 def _exe_dir() -> Path:
     """Directory containing the EXE (when frozen) or this script (when run
-    directly with `python tools/transmute_stub.py` for development)."""
+    directly with `python tools/vitriol_stub.py` for development)."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent
 
 
 def _find_launcher() -> Path | None:
-    """launcher.py lives next to Transmute.exe in the distributed layout.
+    """launcher.py lives next to Vitriol.exe in the distributed layout.
     During development, when running this stub from tools/, it lives one
     directory up."""
     candidates = [
@@ -189,16 +189,16 @@ def _show_python_missing_dialog() -> None:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "Transmute — Python required",
-            "Transmute needs Python 3.11 or newer to run.\n\n"
+            "Vitriol — Python required",
+            "Vitriol needs Python 3.11 or newer to run.\n\n"
             "Please install it from https://www.python.org/downloads/\n"
             "and check the 'Add Python to PATH' box during install.\n\n"
-            "Then double-click Transmute.exe again.",
+            "Then double-click Vitriol.exe again.",
         )
         root.destroy()
     except Exception:
         # No display? Fall back to stderr so cmd-line users see something.
-        print("Transmute requires Python 3.11+. Install from "
+        print("Vitriol requires Python 3.11+. Install from "
               "https://www.python.org/downloads/", file=sys.stderr)
 
 
@@ -211,15 +211,15 @@ def main() -> int:
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
-                "Transmute — install corrupt",
-                "Could not find launcher.py next to Transmute.exe.\n\n"
+                "Vitriol — install corrupt",
+                "Could not find launcher.py next to Vitriol.exe.\n\n"
                 "If you got this from a ZIP archive, make sure you "
-                "extracted the WHOLE folder (Transmute.exe and launcher.py "
+                "extracted the WHOLE folder (Vitriol.exe and launcher.py "
                 "must live side-by-side).",
             )
             root.destroy()
         except Exception:
-            print("launcher.py not found next to Transmute.exe", file=sys.stderr)
+            print("launcher.py not found next to Vitriol.exe", file=sys.stderr)
         return 2
 
     python = _find_python()
@@ -248,7 +248,7 @@ def main() -> int:
             root = tk.Tk()
             root.withdraw()
             messagebox.showerror(
-                "Transmute — could not start",
+                "Vitriol — could not start",
                 f"Failed to launch Python:\n\n{e}\n\nFound Python at:\n{python}",
             )
             root.destroy()

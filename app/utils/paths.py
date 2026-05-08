@@ -6,12 +6,12 @@ Three logical roots:
                       the app is installed under Program Files. Holds the
                       bundled, immutable assets (SVGs, icons, theme.qss).
 
-  user_data_dir()   — %LOCALAPPDATA%/Transmute on Windows; equivalent
+  user_data_dir()   — %LOCALAPPDATA%/Vitriol on Windows; equivalent
                       XDG_DATA_HOME path on Linux/macOS. Holds writable,
                       auto-fetched assets (FFmpeg, Assimp, fonts, hw cache)
                       plus settings + logs. Survives app updates cleanly.
 
-  docs_dir()        — %USERPROFILE%/Documents/Transmute on Windows; ~/Documents
+  docs_dir()        — %USERPROFILE%/Documents/Vitriol on Windows; ~/Documents
                       equivalent elsewhere. Holds conversion OUTPUT — the
                       one place the end-user expects to find their files.
 
@@ -55,13 +55,13 @@ def user_data_dir() -> Path:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     else:
         base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    p = Path(base) / "Transmute"
+    p = Path(base) / "Vitriol"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def docs_dir() -> Path:
-    """User's Documents/Transmute folder — default destination for converted
+    """User's Documents/Vitriol folder — default destination for converted
     output. Auto-created. Honors UC_DOCS_DIR override (used by tests)."""
     env = os.environ.get("UC_DOCS_DIR")
     if env:
@@ -75,7 +75,7 @@ def docs_dir() -> Path:
         base = Path(userprofile) / "Documents"
     else:
         base = Path.home() / "Documents"
-    p = base / "Transmute"
+    p = base / "Vitriol"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -133,7 +133,7 @@ def _repo_bin_dir() -> "Path | None":
 def find_ffmpeg() -> "Path | None":
     """Locate ffmpeg in this order:
       1. UC_BIN_DIR (set by launcher to the actual found-ffmpeg parent)
-      2. bin_dir() (= UC_BIN_DIR or %LOCALAPPDATA%/Transmute/bin)
+      2. bin_dir() (= UC_BIN_DIR or %LOCALAPPDATA%/Vitriol/bin)
       3. Repo-relative bin/ (covers `python -m app.main` without launcher)
       4. PATH (system-wide install)
     Returns None if nothing found.
@@ -234,7 +234,7 @@ def find_font(filename: str) -> Path | None:
 
 
 def output_dir(category: str) -> Path:
-    """Default output dir for a category. Documents/Transmute/<Category>.
+    """Default output dir for a category. Documents/Vitriol/<Category>.
     Auto-created. Falls back to user_data_dir()/output/<Category> only if
     Documents is somehow not writable (extremely rare — locked-down kiosk)."""
     if category not in ALL_CATEGORIES:
@@ -250,7 +250,7 @@ def output_dir(category: str) -> Path:
 def log_file() -> Path:
     base = user_data_dir() / "logs"
     base.mkdir(parents=True, exist_ok=True)
-    return base / "transmute.log"
+    return base / "vitriol.log"
 
 
 def settings_file() -> Path:

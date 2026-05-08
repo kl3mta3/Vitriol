@@ -1,7 +1,7 @@
-"""Build the Inno Setup installer for Transmute.
+"""Build the Inno Setup installer for Vitriol.
 
-Produces `dist/TransmuteSetup-<version>.exe` from the PyInstaller dist
-folder at `dist/Transmute/`.
+Produces `dist/VitriolSetup-<version>.exe` from the PyInstaller dist
+folder at `dist/Vitriol/`.
 
 Usage:
     python tools/build_installer.py
@@ -9,8 +9,8 @@ Usage:
 Prerequisites:
   - Inno Setup 6+ installed. Download: https://jrsoftware.org/isdl.php
     Default install path: `C:\\Program Files (x86)\\Inno Setup 6\\iscc.exe`.
-  - `dist/Transmute/` must already exist (built by
-    `tools/build_transmute_dist.py`). If missing, this script offers to
+  - `dist/Vitriol/` must already exist (built by
+    `tools/build_vitriol_dist.py`). If missing, this script offers to
     run the dist-build first.
 
 The installer is unsigned. Windows SmartScreen will warn end users on
@@ -56,7 +56,6 @@ def _read_version(repo: Path) -> str:
     text = version_file.read_text(encoding="utf-8")
     for line in text.splitlines():
         if line.strip().startswith("__version__"):
-            # Match: __version__ = "1.2.3"
             eq = line.find("=")
             if eq > 0:
                 rhs = line[eq + 1:].strip().strip("'\"")
@@ -67,14 +66,14 @@ def _read_version(repo: Path) -> str:
 
 
 def _ensure_dist(repo: Path) -> None:
-    """Verify dist/Transmute/Transmute.exe exists. Offer to build it if
+    """Verify dist/Vitriol/Vitriol.exe exists. Offer to build it if
     not, or refuse if the user can't approve."""
-    dist_exe = repo / "dist" / "Transmute" / "Transmute.exe"
+    dist_exe = repo / "dist" / "Vitriol" / "Vitriol.exe"
     if dist_exe.exists():
         return
-    print("dist/Transmute/Transmute.exe not found.", file=sys.stderr)
+    print("dist/Vitriol/Vitriol.exe not found.", file=sys.stderr)
     print(f"  Expected at: {dist_exe}", file=sys.stderr)
-    print(f"  Run `python tools/build_transmute_dist.py` first.", file=sys.stderr)
+    print(f"  Run `python tools/build_vitriol_dist.py` first.", file=sys.stderr)
     sys.exit(3)
 
 
@@ -93,9 +92,9 @@ def main() -> int:
     _ensure_dist(repo)
 
     version = _read_version(repo)
-    print(f"Building installer for Transmute {version}")
+    print(f"Building installer for Vitriol {version}")
 
-    iss = repo / "tools" / "transmute.iss"
+    iss = repo / "tools" / "vitriol.iss"
     if not iss.exists():
         print(f"missing Inno Setup script: {iss}", file=sys.stderr)
         return 5
@@ -113,7 +112,7 @@ def main() -> int:
         print(f"iscc failed with exit code {rc}", file=sys.stderr)
         return rc
 
-    out = repo / "dist" / f"TransmuteSetup-{version}.exe"
+    out = repo / "dist" / f"VitriolSetup-{version}.exe"
     if not out.exists():
         print(f"build succeeded but output missing at {out}", file=sys.stderr)
         return 6
