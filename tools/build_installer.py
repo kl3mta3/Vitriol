@@ -124,4 +124,22 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Wrap main() so the console window stays open whether the script
+    # was launched from a cmd shell, by double-click in Explorer, or
+    # from a build pipeline. Without this, double-click users see a
+    # console flash + close in <1 second and can't read output.
+    try:
+        rc = main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        rc = 1
+    print()
+    try:
+        if sys.stdin.isatty():
+            input("Press Enter to close...")
+    except Exception:
+        pass
+    sys.exit(rc)

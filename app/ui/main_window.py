@@ -170,7 +170,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("AppTitle")
         # Hover tooltip surfaces the version — lightweight "About"
         # affordance without adding a menu bar.
-        title.setToolTip(f"Vitriol {__version__}")
+        title.setToolTip(f"V.I.T.R.I.O.L-Visita Interiora Terrae Rectificando Invenies Occultum Lapidemn")
         # Apply Cinzel (engraved-cap serif) to the title only — the rest of
         # the UI keeps its sans-serif. Slight letter-spacing for the classical
         # carved-capital feel.
