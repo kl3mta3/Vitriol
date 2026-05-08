@@ -50,6 +50,10 @@ It also includes a feature called **Philosopher's Stone**: drop any lossless fil
 _**(Requires Python installed)**_<br>
 
 1. Clone Repo
+```bash
+git clone https://github.com/kl3mta3/Vitriol.git
+```
+
 2. Run
    
 ```
