@@ -1,9 +1,16 @@
 # Vitriol
 
+
+<p align="center">
+<em>Visita Interiora Terrae Rectificando Invenies Occultum Lapidem
+</p>
 <p align="center">
   <img src="resources/icons/logo-256.png" alt="Vitriol" width="160"/>
 </p>
-
+<p align="center">
+<em>Visit the interior of the earth; by rectification you will find the hidden stone.
+</p>
+---
 <p align="center">
   <em>A self-contained, offline-first desktop file converter for text, audio, video, image, and 3D model formats.</em>
 </p>
