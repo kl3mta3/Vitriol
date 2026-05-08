@@ -87,6 +87,17 @@ Optional safety toggle in the top bar. With it on, every Stone conversion immedi
 
 The [`samples/`](samples) folder ships with three source files and the Stone outputs Vitriol produces from them, so you can see/hear/run the round-trip without installing anything. Drop any output back into Vitriol to recover the original.
 
+<p align="center">
+  <a href="samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png"><img src="samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png" alt="Stone PNG hiding a zip of audio" width="180"/></a>
+  &nbsp;&nbsp;
+  <a href="samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png"><img src="samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png" alt="Stone PNG hiding The Raven PDF" width="180"/></a>
+  &nbsp;&nbsp;
+  <a href="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.png"><img src="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.png" alt="Stone PNG hiding a Chopin nocturne" width="180"/></a>
+</p>
+<p align="center">
+  <sub><em>Three Stone-mode PNGs — a zip of audio, a PDF, and an m4a recording — all hidden inside ordinary-looking images. Click any one to view full size, then drop it into Vitriol to recover the original file.</em></sub>
+</p>
+
 | Source | Stone outputs |
 |---|---|
 | [`Sample Music Zip.zip`](samples/Sample%20Music%20Zip.zip) — a zip archive of audio files | [`.png`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png) · [`.wav`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.wav) · [`.py`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.py) |
