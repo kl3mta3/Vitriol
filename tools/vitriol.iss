@@ -52,6 +52,21 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 ArchitecturesAllowed=x64
 PrivilegesRequired=admin
+; CloseApplications=yes — when the in-app updater hands a downloaded
+; installer to Inno Setup, the running Vitriol.exe holds a file lock on
+; its own image. This directive tells Inno to close any running
+; instance before replacing files, so updates from inside the app
+; complete without "another process has this file open" errors.
+;
+; RestartApplications=yes — re-launches Vitriol after install completes,
+; so an in-app "Update now" feels seamless: app closes, installer runs,
+; new app opens.
+;
+; The updater itself does subprocess.Popen(detached) + sys.exit(0)
+; before launching the installer, so the close almost always happens
+; without Inno needing to prompt.
+CloseApplications=yes
+RestartApplications=yes
 OutputDir=..\dist
 OutputBaseFilename=VitriolSetup-{#AppVersion}
 SetupIconFile=..\resources\icons\logo.ico

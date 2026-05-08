@@ -25,6 +25,20 @@ def _settings_path() -> Path:
 _DEFAULTS: dict[str, Any] = {
     "masquerade_enabled": False,
     "verify_round_trip": False,
+    # --- auto-update (added v1.1.1) ---
+    # Whether the app checks GitHub Releases for newer versions on launch.
+    # User-toggleable in Preferences. Manual "Check for updates..." in the
+    # Help menu still works regardless of this flag.
+    "auto_check_updates": True,
+    # Unix timestamp of the last successful check (any outcome — newer,
+    # not-newer, error). Used to throttle to once per 24h so we don't
+    # hammer the GitHub API on apps that get launched dozens of times a
+    # day.
+    "last_update_check": 0,
+    # Version string the user clicked "Skip this version" on. While this
+    # equals the latest available version, the banner stays hidden. Once
+    # a newer version comes out, the comparison naturally re-enables it.
+    "skip_version": "",
 }
 
 
