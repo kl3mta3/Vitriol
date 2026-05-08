@@ -1,6 +1,8 @@
-Elastic License 2.0
+Elastic License
 
-Copyright (c) 2026 Equivalent Exchange. All rights reserved.
+Copyright (c) 2026 Kenneth Lasyone.
+
+Released through Equivalent Exchange Studios.
 
 ## Acceptance
 
@@ -96,15 +98,17 @@ licenses.
 ---
 
 Third-party components shipped at runtime are governed by their own licenses:
-  - PySide6 — LGPL v3 (Qt for Python). Distributed unmodified.
-  - Pillow — MIT-CMU License.
-  - cryptography — Apache License 2.0 / BSD 3-Clause.
-  - FFmpeg (optional, installed on first launch) — LGPL v2.1+ for the
-    builds we fetch from gyan.dev. See the FFmpeg README for codec licenses.
-  - Assimp (optional, installed on first launch) — BSD 3-Clause.
-  - Cinzel (optional font, in resources/fonts/) — SIL Open Font License v1.1.
-  - DejaVu Sans (optional, in resources/DejaVuSans.ttf) — Bitstream Vera Fonts
-    Copyright + DejaVu changes Public Domain.
+
+- PySide6 — LGPL v3 (Qt for Python). Distributed unmodified.
+- Pillow — MIT-CMU License.
+- striprtf — BSD 3-Clause License.
+- cryptography — Apache License 2.0 / BSD 3-Clause.
+- FFmpeg (optional, installed on first launch) — LGPL v2.1+ for the
+  builds we fetch from gyan.dev. See the FFmpeg README for codec licenses.
+- Assimp (optional, installed on first launch) — BSD 3-Clause.
+- Cinzel (optional font, in resources/fonts/) — SIL Open Font License v1.1.
+- DejaVu Sans (optional, in resources/DejaVuSans.ttf) — Bitstream Vera Fonts
+  Copyright + DejaVu changes Public Domain.
 
 These third-party components retain their original licenses and are not
-subject to the Elastic License 2.0 above.
+subject to the Elastic License above.
