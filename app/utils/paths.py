@@ -36,9 +36,28 @@ ALL_CATEGORIES = (CATEGORY_TEXT, CATEGORY_AUDIO, CATEGORY_VIDEO, CATEGORY_IMAGES
 # ---------------------------------------------------------------------------
 
 def app_root() -> Path:
-    """Directory where the app lives (next to main.py, or alongside a
-    PyInstaller exe). Treated as read-only at runtime — never write here."""
+    """Directory where the app's bundled, read-only assets live.
+
+    Resolution by mode:
+      - Dev (running `python launcher.py` from the repo): the repo root.
+      - PyInstaller onefile (sys.frozen + sys._MEIPASS = temp extract dir):
+        the temp extract dir, which holds main.py / theme.qss / resources/.
+      - PyInstaller onedir (sys.frozen + sys._MEIPASS = `<exe-dir>/_internal`):
+        the `_internal` folder next to Vitriol.exe, where datas are bundled.
+
+    Always read-only — never write here.
+    """
     if getattr(sys, "frozen", False):
+        # PyInstaller exposes the bundle's data root as sys._MEIPASS for
+        # both onefile (temp extract) and onedir (_internal/) modes. This
+        # is where the spec's `datas = [...]` entries land — main.py,
+        # theme.qss, and the resources/ tree all live here, NOT next to
+        # sys.executable.
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        # Fallback if _MEIPASS isn't set for some reason — older PyInstaller,
+        # or a non-PyInstaller freezer that sets sys.frozen.
         return Path(sys.executable).parent
     return Path(__file__).resolve().parent.parent.parent
 

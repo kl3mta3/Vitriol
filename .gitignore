@@ -29,3 +29,6 @@ logs/
 *.swo
 *.log
 .claude/
+
+# Allow this specific sample exe file 
+!Chopin\ -\ Nocturne\ Op.\ 9\ (Password\ is\ Chopin).exe

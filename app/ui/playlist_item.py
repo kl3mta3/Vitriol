@@ -128,6 +128,15 @@ class PlaylistItemWidget(QWidget):
         )
         self.compiler_checkbox.setVisible(False)
         layout.addWidget(self.compiler_checkbox)
+        # Toggling Compiler flips the row from "plain .py text dump" to
+        # "Stone-mode self-extracting script" — which means the password
+        # lock becomes available even for sources that share .py's
+        # category (text → .py). Re-evaluate the lock visibility on
+        # every toggle so the 🔓 appears/disappears immediately rather
+        # than waiting for the user to re-pick the target.
+        self.compiler_checkbox.toggled.connect(
+            lambda _checked: self._refresh_stone_lock_visibility()
+        )
 
         # 6c. Stone password toggle — only visible when global Stone is on.
         # Renders as 🔓 (no password set) or 🔒 (password set). Click opens
@@ -135,6 +144,15 @@ class PlaylistItemWidget(QWidget):
         # never written to disk. The byte string is forwarded to the queue
         # via Job.password.
         self._stone_password: bytes = b""
+
+        # Per-row choice for 3D animation/rig preservation. Set by
+        # MainWindow's pre-flight prompt when the source has animations
+        # AND the target format can carry them (.fbx/.dae/.glb/.gltf).
+        # Forwarded to Job.preserve_animations. Default False = drop
+        # animations (the safe, deterministic outcome). MainWindow only
+        # prompts the user when both conditions above are met; for all
+        # other rows this stays False and is harmless.
+        self._preserve_animations: bool = False
         self.stone_lock_btn = QPushButton("\U0001F513")  # 🔓
         self.stone_lock_btn.setObjectName("StoneLock")
         self.stone_lock_btn.setFlat(True)
@@ -247,6 +265,14 @@ class PlaylistItemWidget(QWidget):
         Held in widget memory only; never persisted."""
         return self._stone_password
 
+    def preserve_animations(self) -> bool:
+        """Per-row 3D animation-preservation choice. Set by MainWindow's
+        pre-flight prompt; default False = drop animations on export."""
+        return self._preserve_animations
+
+    def set_preserve_animations(self, value: bool) -> None:
+        self._preserve_animations = bool(value)
+
     def _on_stone_lock_clicked(self) -> None:
         from .stone_password_dialog import StonePasswordDialog
         dlg = StonePasswordDialog(current_password=self._stone_password, parent=self)
@@ -280,6 +306,16 @@ class PlaylistItemWidget(QWidget):
         # Zip targets never encrypt — hide the icon regardless of category.
         if dst == ".zip":
             return False
+        # `.py` with Compiler ON, and `.exe` always, are Stone-mode
+        # wrapping operations regardless of source category. They support
+        # password protection independent of whether the source is image,
+        # audio, doc, etc. Without these special-cases, doc→.py and
+        # doc→.exe (e.g. .pdf → .py) would collapse to same-category
+        # ("doc") and silently hide the password icon.
+        if dst == ".py" and self.compiler_checkbox.isChecked():
+            return True
+        if dst == ".exe":
+            return True
         # STONE_ONLY_SOURCES (.zip, .exe) have no "same-type" doc category
         # in any meaningful sense — every conversion FROM them is inherently
         # transformative and engages encryption. Treat them as cross-type

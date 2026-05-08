@@ -83,6 +83,22 @@ Wrong-password behavior depends on the host type. Two distinct designs for two t
 
 Optional safety toggle in the top bar. With it on, every Stone conversion immediately runs in reverse into a temp folder, and the output is only committed if the reverse produces bytes matching the original input. If they don't match, the output is discarded and the row is marked failed. Catches end-to-end integrity issues before they reach disk.
 
+### Samples
+
+The [`samples/`](samples) folder ships with three source files and the Stone outputs Vitriol produces from them, so you can see/hear/run the round-trip without installing anything. Drop any output back into Vitriol to recover the original.
+
+| Source | Stone outputs |
+|---|---|
+| [`Sample Music Zip.zip`](samples/Sample%20Music%20Zip.zip) — a zip archive of audio files | [`.png`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png) · [`.wav`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.wav) · [`.py`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.py) |
+| [`The Raven By Edgar Allan Poe.pdf`](samples/The%20Raven%20By%20Edgar%20Allan%20Poe%20.pdf) | [`.png`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png) · [`.wav`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.wav) · [`.mkv`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.mkv) · [`.py`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.py) |
+| [`Chopin - Nocturne Op. 9, No. 2.m4a`](samples/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.m4a) | [`.png`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.png) · [`.py`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.py) · [`.exe`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.exe) — password: `Chopin` |
+
+Each output is a real working file of its host type — the `.png` opens in any image viewer, the `.wav` plays in any audio player, the `.mkv` plays in any video player, the `.py` runs with `python file.py`, and the `.exe` runs by double-click on Windows.
+
+### Layering
+
+Stone conversions can be chained for additional depth. Save a file as a `.png`, drop the `.png` back in and save it as a `.wav`, then the `.wav` as an `.mkv`, and so on. Each layer can carry its own password — recovering the original means unwrapping every layer in reverse order with the right password at each step. Forgetting any one password breaks the chain. Used sparingly this is a heavy increase in protection at the cost of file size and recovery effort.
+
 ## Markdown bundles (rich-format conversions)
 
 When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output:
@@ -110,7 +126,7 @@ The `.md` references images by relative paths (`![alt](images/image1.png)`). Pur
 - **Read-only formats:** PPTX, ODT, SVG, RTF write (RTF read works via striprtf).
 - **PDF write** supports headings, paragraphs, lists, basic tables, and image placeholders. Bundled DejaVu Sans gives Latin Extended + Cyrillic + Greek coverage.
 - **PDF read** handles uncompressed and FlateDecode streams. Encrypted PDFs and image-only (scanned, non-OCR) PDFs are not supported.
-- **3D conversions** preserve geometry only — animations and skeletons are dropped.
+- **3D conversions** preserve geometry by default. When the source has animation/rig data AND the target format can carry it (`.fbx`, `.dae`, `.glb`, `.gltf`), Vitriol asks once — Yes attempts to preserve animations through the export (best-effort; outcome depends on the format pair), No strips them cleanly for predictable static-geometry output. Targets that can't carry animations by spec (`.obj`, `.stl`, `.ply`, `.3ds`) skip the prompt and always export geometry only.
 
 ## License
 

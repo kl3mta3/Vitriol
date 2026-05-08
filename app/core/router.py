@@ -54,6 +54,7 @@ def convert_file(
     masquerade: bool = False,
     compiler: bool = False,
     password: bytes = b"",
+    preserve_animations: bool = False,
 ) -> None:
     """Run a single conversion. Raises UnsupportedConversionError on bad pairs.
 
@@ -221,8 +222,14 @@ def convert_file(
     media_dst = fh.MEDIA_HANDLERS.get(dst_ext)
 
     # Media path: same media module owns the whole conversion.
+    # Model handler accepts an extra preserve_animations kwarg; other
+    # media handlers don't, so we gate the kwarg on MEDIA_CATEGORY.
     if media_src and media_dst and media_src is media_dst:
-        media_src.convert(src, dst, src_ext, dst_ext, cancel, progress)
+        if getattr(media_src, "MEDIA_CATEGORY", "") == "model":
+            media_src.convert(src, dst, src_ext, dst_ext, cancel, progress,
+                              preserve_animations=preserve_animations)
+        else:
+            media_src.convert(src, dst, src_ext, dst_ext, cancel, progress)
         return
     # Special case: video -> audio (same module = audio_video).
     if media_src and media_dst and getattr(media_src, "MEDIA_CATEGORY", "") in ("audio", "video") \

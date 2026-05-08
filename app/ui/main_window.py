@@ -352,6 +352,27 @@ class MainWindow(QMainWindow):
                 ):
                     return
             widget._verify_warned = True
+        # Single-row animation pre-flight. The bulk handlers already mark
+        # _animation_choice_made on rows they prompted for, so this only
+        # fires when the user clicks Transmute on an individual row that
+        # didn't go through the batch prompt.
+        if self._row_needs_animation_prompt(widget):
+            msg = (
+                f"{widget.path.name} contains animation/rig data, and "
+                f"{target_ext} can carry it.\n\n"
+                "Try to preserve animations during conversion?\n\n"
+                "Yes — best-effort preservation. Some rigs and keyframes "
+                "may survive, others may not, depending on Assimp's exporter "
+                "for this format pair.\n\n"
+                "No — strip animations cleanly. Output is deterministically "
+                "static geometry."
+            )
+            yes, _ = dialogs.confirm_with_apply_to_all(
+                self, "Preserve 3D animations?", msg,
+                apply_label="Apply to all 3D files in this batch"
+            )
+            widget.set_preserve_animations(yes)
+            widget._animation_choice_made = True
         widget.reset_for_rerun()
         widget.set_status(Status.RUNNING)
         out = widget.output_path()
@@ -365,6 +386,7 @@ class MainWindow(QMainWindow):
             verify_round_trip=verify,
             compiler=widget.compiler_enabled(),
             password=widget.stone_password() if masq else b"",
+            preserve_animations=widget.preserve_animations(),
         )
         self._job_to_widget[job_id] = widget
 
@@ -471,6 +493,60 @@ class MainWindow(QMainWindow):
             w._verify_warned = True
         return True
 
+    def _row_needs_animation_prompt(self, widget: PlaylistItemWidget) -> bool:
+        """True if this row is a 3D conversion where the source has
+        animation tracks AND the target format can carry them — meaning
+        the user should be asked whether to attempt preservation. Skipped
+        once a choice has been recorded for this widget (idempotent across
+        retries within a session)."""
+        if getattr(widget, "_animation_choice_made", False):
+            return False
+        from ..format_handlers.model_handler import (
+            has_animations, ANIMATION_CAPABLE_TARGETS, SUPPORTED,
+        )
+        src_ext = widget.src_ext.lower()
+        target_ext = (widget.target_ext() or "").lower()
+        if src_ext not in SUPPORTED:
+            return False
+        if target_ext not in ANIMATION_CAPABLE_TARGETS:
+            return False
+        try:
+            return has_animations(widget.path)
+        except Exception:
+            # If detection fails (DLL missing, file unreadable, etc.),
+            # fall through to default static-only behavior — no prompt.
+            return False
+
+    def _bulk_animation_preflight(self, items: list[PlaylistItemWidget]) -> bool:
+        """Pre-flight scan for 3D rows that should get the animation-
+        preservation prompt. Shows ONE dialog per batch (with apply-to-all
+        semantics) if any rows are eligible. Stamps _animation_choice_made
+        on each eligible row so the per-row prompt in _start_convert
+        doesn't fire again. Returns True so the conversion can proceed
+        either way (the dialog can't fail — Yes or No are both valid)."""
+        eligible = [w for w in items
+                     if not w.is_running() and w.status() != Status.DONE
+                     and self._row_needs_animation_prompt(w)]
+        if not eligible:
+            return True
+        msg = (
+            f"{len(eligible)} item(s) in this batch contain animation/rig data "
+            f"and have target formats that can carry it.\n\n"
+            "Try to preserve animations during conversion?\n\n"
+            "Yes — best-effort preservation. Actual outcome depends on the "
+            "format pair; some rigs and keyframes may survive, others may not.\n\n"
+            "No — strip animations cleanly. Output is deterministically static "
+            "geometry, predictable across all formats."
+        )
+        yes, _ = dialogs.confirm_with_apply_to_all(
+            self, "Preserve 3D animations?", msg,
+            apply_label=f"Apply to all {len(eligible)} animated items"
+        )
+        for w in eligible:
+            w.set_preserve_animations(yes)
+            w._animation_choice_made = True
+        return True
+
     def _on_convert_all(self) -> None:
         items = self.playlist.items()
         if not items:
@@ -478,6 +554,8 @@ class MainWindow(QMainWindow):
         if not dialogs.confirm(self, "Convert all?", f"Convert all {len(items)} item(s) in the playlist?"):
             return
         if not self._bulk_verify_preflight(items):
+            return
+        if not self._bulk_animation_preflight(items):
             return
         for w in items:
             if not w.is_running() and w.status() != Status.DONE:
@@ -491,6 +569,8 @@ class MainWindow(QMainWindow):
         if not dialogs.confirm(self, "Convert selected?", f"Convert {len(items)} selected item(s)?"):
             return
         if not self._bulk_verify_preflight(items):
+            return
+        if not self._bulk_animation_preflight(items):
             return
         for w in items:
             if not w.is_running():

@@ -49,6 +49,7 @@ class Job:
     verify_round_trip: bool = False
     compiler: bool = False  # .py target: produce a self-extracting Stone script
     password: bytes = b""   # Stone v3 envelope encryption key; empty = default
+    preserve_animations: bool = False  # 3D: keep rigs/animations through Assimp
     total_bytes: int = 0   # populated at submit() from src.stat().st_size
     cancel: CancellationToken = field(default_factory=CancellationToken)
 
@@ -122,7 +123,8 @@ class _Runnable(QRunnable):
                 convert_file(job.src, dst, job.src_ext, job.dst_ext, job.cancel,
                              on_progress, warnings,
                              masquerade=job.masquerade, compiler=job.compiler,
-                             password=job.password)
+                             password=job.password,
+                             preserve_animations=job.preserve_animations)
                 for w in warnings:
                     sig.warning.emit(job.id, w)
                 if job.save_over_original and dst != job.src:
@@ -294,6 +296,7 @@ class ConversionQueue(QObject):
         verify_round_trip: bool = False,
         compiler: bool = False,
         password: bytes = b"",
+        preserve_animations: bool = False,
     ) -> int:
         job_id = self._next_id
         self._next_id += 1
@@ -311,6 +314,7 @@ class ConversionQueue(QObject):
             verify_round_trip=verify_round_trip,
             compiler=compiler,
             password=password,
+            preserve_animations=preserve_animations,
             total_bytes=total_bytes,
             cancel=token,
         )
