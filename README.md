@@ -125,12 +125,6 @@ desired_output_location/
 
 The `.md` references images by relative paths (`![alt](images/image1.png)`). Pure-text conversions still produce a flat `.md`. The reverse direction (md → docx) reads this structure if present and re-embeds the images.
 
-## Customization
-
-- **Theme** — edit `theme.qss`. The `{RES}` placeholder is substituted with the resources directory at load time, so QSS rules can reference assets like `image: url({RES}/icon.svg)`.
-- **Hardware encoders** — auto-detected. Result is cached and refreshed when the FFmpeg binary updates. No UI toggle.
-- **Settings** — persisted at `%LOCALAPPDATA%/Vitriol/settings.json` on Windows.
-- **Logo** — edit `resources/logo.svg`, then run `python tools/generate_icons.py` to regenerate the icon set.
 
 ## Scope notes / known limits
 
@@ -162,4 +156,4 @@ Modifications must be marked as such. See LICENSE for the full text and definiti
 - [DejaVu Sans](https://dejavu-fonts.github.io/) (auto-fetched) — Bitstream Vera + DejaVu Public Domain
 - [Cinzel](https://fonts.google.com/specimen/Cinzel) (auto-fetched) — SIL Open Font License 1.1
 
-The launcher fetches these from their official upstream sources over HTTPS on first run. SHA-256 verification is supported per release; see the constants at the top of `launcher.py` to lock specific versions before shipping.
+The launcher fetches these from their official upstream sources over HTTPS on first run, if missing. SHA-256 verification is supported per release; see the constants at the top of `launcher.py` to lock specific versions before shipping.
