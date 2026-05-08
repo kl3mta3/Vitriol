@@ -58,7 +58,20 @@ def main() -> int:
         print(f"build did not produce {exe}", file=sys.stderr)
         return 2
 
+    # Sign Vitriol.exe BEFORE reporting size or chaining into the
+    # installer build. The Authenticode block changes the file's bytes
+    # and therefore its size + SHA-256 — the installer must bundle the
+    # signed copy, not the unsigned one. If AzTS isn't configured,
+    # sign.sign_file prints a clear notice and returns False; we
+    # continue with an unsigned exe so dev builds still complete.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sign import sign_file  # noqa: E402
+
+    sign_file(exe)
+
     # Report the total size so we have a sense of the ZIP / installer payload.
+    # Re-stat AFTER signing so the reported size matches the artifact
+    # that ships (Authenticode adds ~10 KB).
     total_bytes = sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
     print(f"\nBuild complete: {out}")
     print(f"  Vitriol.exe: {exe.stat().st_size / (1024 * 1024):.1f} MB")

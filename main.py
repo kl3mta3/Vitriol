@@ -4,12 +4,13 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QTimer
+from PySide6.QtCore import QSettings, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from app.utils.logger import get_logger
 from app.utils.paths import app_root, log_file, resources_dir
+from app.utils import settings as app_settings
 from app import format_handlers
 
 
@@ -78,6 +79,63 @@ def _load_app_icon(app: QApplication) -> None:
         if p.exists():
             app.setWindowIcon(QIcon(str(p)))
             return
+
+
+class _UpdateCheckThread(QThread):
+    """Background thread that fetches the GitHub Releases manifest and
+    emits `update_available(info)` if a newer version is found.
+
+    Lives in main.py rather than app/core/updater.py because the updater
+    module is intentionally PySide6-free (so it can be unit-tested
+    headless). The GUI-side QThread wrapper belongs with the rest of
+    the app entry-point glue.
+    """
+    update_available = Signal(dict)
+
+    def run(self) -> None:
+        # Local import keeps the updater module out of the
+        # synchronous-import path. The check is best-effort — a network
+        # failure or a malformed response simply returns None and the
+        # thread exits without emitting.
+        try:
+            from app.core import updater
+            info = updater.check_for_update(silent=True)
+        except Exception:
+            # Belt-and-suspenders. check_for_update is supposed to
+            # swallow its own errors when silent=True, but we never want
+            # an uncaught exception in a worker thread to surface as
+            # an "Application Error" dialog the user can't dismiss.
+            return
+        if info is not None:
+            self.update_available.emit(info)
+
+
+def _maybe_check_for_update(window) -> None:
+    """Decide whether to fire the launch-time update check, and if so
+    spawn the worker thread. Called via QTimer.singleShot 2 s after the
+    main window appears — that delay keeps the network call from
+    competing with first-paint or splash teardown for resources.
+
+    Three short-circuits, in order of cheapness:
+      - User disabled auto-checks in Preferences.
+      - Less than 24 h since the last successful check.
+      - Updater module fails to import (cosmic-ray-tier; degrade silently).
+    """
+    if not app_settings.get("auto_check_updates"):
+        return
+    try:
+        from app.core import updater
+    except Exception:
+        return
+    if not updater.should_check_now():
+        return
+    thread = _UpdateCheckThread(window)
+    # Hold a reference on the window so the thread isn't GC'd before it
+    # finishes. deleteLater on `finished` keeps the lifetime tidy.
+    window._update_launch_thread = thread
+    thread.update_available.connect(window.show_update_banner)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
 
 
 def _install_exception_logging(log) -> None:
@@ -158,6 +216,11 @@ def main() -> int:
         def _show_main_window() -> None:
             splash.close()
             win.show()
+            # Schedule the launch-time update check 2 s after the main
+            # window appears so the network call doesn't compete with
+            # first-paint or splash teardown for CPU/IO. The check itself
+            # is fully async on a worker thread.
+            QTimer.singleShot(2000, lambda: _maybe_check_for_update(win))
         if splash._dismissed:
             # Splash already finished while we were building the window.
             # Just show — no need to wait for an event that's already past.
@@ -166,6 +229,7 @@ def main() -> int:
             splash.animation_finished.connect(_show_main_window)
     else:
         win.show()
+        QTimer.singleShot(2000, lambda: _maybe_check_for_update(win))
     return app.exec()
 
 

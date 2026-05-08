@@ -10,11 +10,12 @@ Prerequisites:
   - Inno Setup 6+ installed. Download: https://jrsoftware.org/isdl.php
     Default install path: `C:\\Program Files (x86)\\Inno Setup 6\\iscc.exe`.
   - `dist/Vitriol/` must already exist (built by
-    `tools/build_vitriol_dist.py`). If missing, this script offers to
-    run the dist-build first.
-
-The installer is unsigned. Windows SmartScreen will warn end users on
-first run; signing with an EV certificate is a separate post-step.
+    `tools/build_vitriol_dist.py`). The dist-builder signs Vitriol.exe
+    via Azure Trusted Signing before this script bundles it; this
+    script then signs the produced VitriolSetup-*.exe at the end.
+  - Azure Trusted Signing env vars (VITRIOL_AZTS_*) — see tools/sign.py.
+    If unset, both this script and the dist-builder skip signing with
+    a printed warning, leaving unsigned artifacts.
 """
 from __future__ import annotations
 import os
@@ -77,6 +78,39 @@ def _ensure_dist(repo: Path) -> None:
     sys.exit(3)
 
 
+def _check_inner_exe_signed(repo: Path, signtool: Path | None) -> None:
+    """Warn if the bundled Vitriol.exe isn't signed.
+
+    We do NOT abort — the user might be intentionally producing an
+    unsigned dev installer. But the warning is loud because shipping
+    a signed installer that bundles an UNSIGNED inner exe is a
+    confusing user experience: the installer prompts a verified
+    publisher, then the installed app prompts "Unknown publisher" on
+    first launch. The fix is always to re-run the dist build after
+    setting up AzTS, then re-run this script."""
+    if signtool is None:
+        return
+    inner = repo / "dist" / "Vitriol" / "Vitriol.exe"
+    rc = subprocess.call(
+        [str(signtool), "verify", "/pa", "/q", str(inner)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if rc != 0:
+        print()
+        print("=" * 64)
+        print("WARNING: dist/Vitriol/Vitriol.exe is NOT signed.")
+        print()
+        print("The installer will be signed (if AzTS is configured), but")
+        print("the bundled app inside will not. End users will see the")
+        print("verified publisher on the installer prompt, then 'Unknown")
+        print("publisher' the first time they launch the installed app.")
+        print()
+        print("To fix: re-run `python tools/build_vitriol_dist.py` with")
+        print("the VITRIOL_AZTS_* env vars set, then re-run this script.")
+        print("=" * 64)
+        print()
+
+
 def main() -> int:
     repo = Path(__file__).resolve().parent.parent
     iscc = _find_iscc()
@@ -116,11 +150,48 @@ def main() -> int:
     if not out.exists():
         print(f"build succeeded but output missing at {out}", file=sys.stderr)
         return 6
+
+    # Sign the produced installer via Azure Trusted Signing. This
+    # MUST happen after iscc finishes — Inno's compressor would
+    # blow away any signature applied earlier. Conversely, the inner
+    # Vitriol.exe needs to be signed BEFORE Inno bundles it (handled
+    # by tools/build_vitriol_dist.py). If AzTS isn't configured,
+    # sign_file prints a clear notice and returns False; we fall
+    # through to the unsigned-install path below.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sign import sign_file  # noqa: E402
+
+    # Pre-flight sanity check: warn loudly if the inner exe isn't
+    # signed, because the installer-only-signed case produces a
+    # confusing UAC vs. first-launch publisher mismatch.
+    _check_inner_exe_signed(repo, _find_signtool_for_check())
+
+    signed = sign_file(out)
+
+    # Re-stat AFTER signing — Authenticode appends ~10 KB so the
+    # reported size matches the file users will download.
     size_mb = out.stat().st_size / (1024 * 1024)
     print()
     print(f"OK → {out}  ({size_mb:.1f} MB)")
-    print(f"   Unsigned. Windows SmartScreen will warn on first run.")
+    if signed:
+        print(f"   Signed via Azure Trusted Signing.")
+        print(f"   SHA-256 in hand: run `Get-FileHash` on the file above")
+        print(f"   and paste the result into RELEASE_NOTES_INSTALLER.md.")
+    else:
+        print(f"   UNSIGNED. SmartScreen will warn end users on first run.")
+        print(f"   Set VITRIOL_AZTS_* env vars to enable signing.")
     return 0
+
+
+def _find_signtool_for_check() -> Path | None:
+    """Re-use sign.py's signtool discovery for the pre-flight sanity
+    check. Lives here as a thin pass-through so the import stays
+    tucked inside main() rather than at module-import time (sign.py
+    imports tempfile/json which we don't want to pay for if iscc
+    fails early)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from sign import _find_signtool  # noqa: E402
+    return _find_signtool()
 
 
 if __name__ == "__main__":

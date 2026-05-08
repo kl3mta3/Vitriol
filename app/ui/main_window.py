@@ -2,11 +2,12 @@
 from __future__ import annotations
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QFontDatabase, QIcon
+from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtGui import QAction, QFont, QFontDatabase, QIcon
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStatusBar, QVBoxLayout, QWidget
+    QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton, QStatusBar,
+    QVBoxLayout, QWidget,
 )
 
 from ..utils.paths import resources_dir
@@ -171,6 +172,14 @@ class MainWindow(QMainWindow):
         # Hover tooltip surfaces the version — lightweight "About"
         # affordance without adding a menu bar.
         title.setToolTip(f"V.I.T.R.I.O.L-Visita Interiora Terrae Rectificando Invenies Occultum Lapidemn")
+        # Right-click on the wordmark exposes admin actions that don't
+        # warrant a full menu bar — currently just "Check for updates…".
+        # Discoverable enough through power-user habit; the automatic
+        # 24h check is what casual users will actually rely on.
+        title.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        title.customContextMenuRequested.connect(
+            lambda pos, t=title: self._show_title_context_menu(t.mapToGlobal(pos))
+        )
         # Apply Cinzel (engraved-cap serif) to the title only — the rest of
         # the UI keeps its sans-serif. Slight letter-spacing for the classical
         # carved-capital feel.
@@ -265,6 +274,35 @@ class MainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(64)
         self._status("Ready.")
 
+        # Persistent "Update available" pill on the right side of the
+        # status bar. Hidden by default; shown by show_update_banner()
+        # when the launch-time check finds a newer release. Clicking it
+        # opens the UpdateAvailableDialog. addPermanentWidget() places
+        # it at the right edge so transient status messages on the left
+        # never overlap it.
+        self._update_btn = QPushButton("")
+        self._update_btn.setObjectName("UpdateBanner")
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.setFlat(True)
+        self._update_btn.setStyleSheet(
+            "QPushButton#UpdateBanner {"
+            " color: #fde68a;"
+            " background-color: rgba(146, 64, 14, 0.6);"
+            " border: 1px solid rgba(251, 191, 36, 0.5);"
+            " border-radius: 10px;"
+            " padding: 3px 12px;"
+            " margin-right: 8px;"
+            " font-weight: bold;"
+            "}"
+            "QPushButton#UpdateBanner:hover {"
+            " background-color: rgba(180, 83, 9, 0.8);"
+            "}"
+        )
+        self._update_btn.clicked.connect(self._open_update_dialog)
+        self._update_btn.hide()
+        self._pending_update_info: dict | None = None
+        self.statusBar().addPermanentWidget(self._update_btn)
+
         # Inscribed manuscript border + vignette parented to the QMainWindow
         # itself so they wrap the entire window including the status bar.
         # The bottom border line ends up BELOW the "Ready." text, which gives
@@ -300,6 +338,190 @@ class MainWindow(QMainWindow):
         # 4 spaces ≈ 20 px at the default UI font — matches what padding-left
         # would have done if QStatusBar honored it.
         self.statusBar().showMessage("    " + msg, timeout)
+
+    # --- Auto-update integration ------------------------------------------
+    # Three pieces:
+    #   1. show_update_banner(info) — shown via signal from main.py's
+    #      launch-time UpdateCheckThread when a newer release exists.
+    #   2. _show_title_context_menu — right-click on the wordmark exposes
+    #      a manual "Check for updates…" action.
+    #   3. _open_update_dialog / _run_install_flow — shared by both
+    #      the banner click and the manual check, so the install flow
+    #      lives in exactly one place.
+
+    def show_update_banner(self, info: dict) -> None:
+        """Slot — invoked when the launch-time update check finds a newer
+        release. Stashes the info, makes the right-side status bar pill
+        visible. Clicking the pill opens the UpdateAvailableDialog."""
+        if not info:
+            return
+        self._pending_update_info = info
+        version = info.get("version", "")
+        self._update_btn.setText(f"  ↑ Update {version} available  ")
+        self._update_btn.setToolTip(
+            f"Vitriol {version} is available. Click to view release notes "
+            f"and install."
+        )
+        self._update_btn.show()
+
+    def _open_update_dialog(self) -> None:
+        """Banner click handler — opens the UpdateAvailableDialog with the
+        last fetched info. Falls back to a manual check if no info has
+        been stashed (shouldn't happen in normal flow, but defensive)."""
+        info = self._pending_update_info
+        if info is None:
+            self._check_updates_manual()
+            return
+        self._show_update_dialog(info)
+
+    def _show_title_context_menu(self, global_pos) -> None:
+        """Right-click on the Vitriol wordmark. Currently exposes
+        'Check for updates…' as the only entry; future actions (About,
+        Preferences) plug in here without needing a full menu bar."""
+        menu = QMenu(self)
+        check_action = QAction("Check for updates…", self)
+        check_action.triggered.connect(self._check_updates_manual)
+        menu.addAction(check_action)
+        menu.exec(global_pos)
+
+    def _check_updates_manual(self) -> None:
+        """Manual 'Check for updates…' action — runs the API call on a
+        worker thread (so the UI doesn't freeze on a slow connection)
+        and shows one of three outcomes:
+          - newer version: open UpdateAvailableDialog
+          - up to date: brief "You're running the latest version." toast
+          - error: error dialog with the underlying message
+        """
+        # Local imports keep updater + QThread out of MainWindow's
+        # import-time dependency tree; the Help-menu path is rarely hit.
+        from PySide6.QtCore import QThread
+        from ..core import updater
+
+        self._status("Checking for updates…")
+
+        class _Worker(QThread):
+            done = Signal(object, object)  # (info_or_none, error_or_none)
+
+            def run(self_inner) -> None:  # type: ignore[no-self-argument]
+                try:
+                    result = updater.check_for_update(silent=False)
+                    self_inner.done.emit(result, None)
+                except Exception as e:
+                    self_inner.done.emit(None, e)
+
+        worker = _Worker(self)
+        # Hold a reference on `self` so the QThread isn't GC'd before it
+        # finishes. _Worker.deleteLater on done so the slot doesn't leak.
+        self._update_check_worker = worker
+
+        def _on_done(result, error):
+            self._status("Ready.")
+            if error is not None:
+                dialogs.error(self, "Update check failed", str(error))
+                worker.deleteLater()
+                return
+            if result is None:
+                dialogs.info(
+                    self, "Up to date",
+                    f"You're running the latest version of Vitriol ({__version__})."
+                )
+                worker.deleteLater()
+                return
+            self.show_update_banner(result)
+            self._show_update_dialog(result)
+            worker.deleteLater()
+
+        worker.done.connect(_on_done)
+        worker.start()
+
+    def _show_update_dialog(self, info: dict) -> None:
+        """Open the UpdateAvailableDialog and act on the user's choice."""
+        from .dialogs import (
+            UpdateAvailableDialog, UPDATE_INSTALL, UPDATE_OPEN_PAGE,
+            UPDATE_SKIP, UPDATE_LATER,
+        )
+        from ..core import updater
+
+        portable = updater.is_portable_build()
+        dlg = UpdateAvailableDialog(self, info, portable=portable)
+        choice = dlg.run()
+
+        if choice == UPDATE_SKIP:
+            settings.set("skip_version", info.get("version", ""))
+            self._update_btn.hide()
+            self._pending_update_info = None
+            return
+
+        if choice == UPDATE_OPEN_PAGE:
+            import webbrowser
+            webbrowser.open(updater.GITHUB_RELEASES_PAGE)
+            return
+
+        if choice == UPDATE_INSTALL:
+            self._run_install_flow(info)
+            return
+
+        # UPDATE_LATER or dialog dismissed — leave the banner showing so
+        # the user can come back to it later in this session, and let
+        # the 24h throttle govern the next launch reminder.
+
+    def _run_install_flow(self, info: dict) -> None:
+        """Download the installer with a progress dialog, then launch it.
+
+        On success this method does NOT return — `launch_installer_and_exit`
+        calls sys.exit(0) so the running Vitriol releases its file lock
+        before the installer touches Program Files.
+        """
+        from PySide6.QtCore import QThread
+        from PySide6.QtWidgets import QProgressDialog
+        from ..core import updater
+
+        progress = QProgressDialog(
+            f"Downloading Vitriol {info.get('version', '')}…",
+            "Cancel", 0, 100, self,
+        )
+        progress.setWindowTitle("Updating Vitriol")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setValue(0)
+
+        class _DLWorker(QThread):
+            tick = Signal(int)
+            done = Signal(object, object)  # (path_or_none, error_or_none)
+
+            def run(self_inner) -> None:  # type: ignore[no-self-argument]
+                def cb(fraction: float) -> None:
+                    self_inner.tick.emit(int(fraction * 100))
+                try:
+                    path = updater.download_installer(info, on_progress=cb)
+                    self_inner.done.emit(path, None)
+                except Exception as e:
+                    self_inner.done.emit(None, e)
+
+        worker = _DLWorker(self)
+        self._update_dl_worker = worker
+
+        worker.tick.connect(progress.setValue)
+
+        def _on_done(path, error):
+            progress.close()
+            if error is not None:
+                dialogs.error(self, "Update failed", str(error))
+                worker.deleteLater()
+                return
+            # Hand off to the installer. This call doesn't return — the
+            # app exits to release its file lock so Inno can replace
+            # Vitriol.exe cleanly. RestartApplications=yes in the .iss
+            # re-launches the new build after install finishes.
+            try:
+                updater.launch_installer_and_exit(path)
+            except Exception as e:
+                dialogs.error(self, "Update launch failed", str(e))
+                worker.deleteLater()
+
+        worker.done.connect(_on_done)
+        worker.start()
 
     def _on_playlist_changed(self) -> None:
         """Fade the drop-zone watermark up (empty) or down (non-empty)."""

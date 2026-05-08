@@ -1,4 +1,8 @@
+<div align="center">
+
 # Vitriol
+
+</div>
 
 
 <p align="center">
@@ -35,25 +39,105 @@ It also includes a feature called **Philosopher's Stone**: drop any lossless fil
 - **Video** — mp4, mkv, webm, avi, mov, wmv, flv, mpg, 3gp, ts, vob, ogv
 - **3D models** — glb, gltf, obj, stl, fbx, ply, dae, 3ds
 
+<br></br>
+
 ## Install & run
 
+---
+
+### From Clone:
+
+_**(Requires Python installed)**_<br>
+
+1. Clone Repo
+2. Run
+   
 ```
-python launcher.py
+Vitriol.exe 
+```
+or 
+```
+Launcher.py
 ```
 
 That's the entire setup. On first launch the launcher installs four Python packages (`PySide6`, `Pillow`, `striprtf`, `cryptography`), downloads FFmpeg + Assimp + bundled fonts to local folders, probes for hardware video encoders, and hands off to the main app. Subsequent launches are instant.
 
+---
+
+### From Zip:
+_**(NO Python install required)**_<br>
+
+1. Download Vitriol 1.1.0 — Portable Edition.zip here:( [Vitriol 1.1.0 — Portable Edition](https://github.com/kl3mta3/Vitriol/releases/download/Vitriol_1.1.0_Portable_Edition/Vitriol.1.1.0.Portable.Edition.zip)).
+2. Unzip Vitriol 1.1.0 — Portable Edition.zip
+3. Run
+   
+```
+Vitriol.exe
+```
+That's the entire setup. Everything is bundled already!
+
+---
+
+### Fron Installer:
+_**(NO Python install required)**_ <br>
+
+1. Download VitriolSetup-1.1.0.exe here:( [VitriolSetup-1.1.0.exe](https://github.com/kl3mta3/Vitriol/releases/download/VitriolSetup_1.1.0_Windows/VitriolSetup-1.1.0.exe)).
+2. Run
+   
+```
+VitriolSetup-1.1.0.exe
+```
+
+That's the entire setup. Everything is bundled already!
+
+---
+
 When packaged as the installer (`VitriolSetup-x.y.z.exe` from `tools/build_installer.py`), end users don't need Python at all — everything is bundled.
 
-## Philosophy
+---
 
-Vitriol is **offline-first**. Everything runs locally — no telemetry, no network calls during conversions, no third-party APIs. The launcher fetches FFmpeg and Assimp from their official sites once, then never touches the network again.
-
-Minimal dependencies: four Python packages, two native binaries (FFmpeg, Assimp). Everything else — docx, xlsx, pptx, epub, pdf, markdown, charset detection — is implemented from the standard library. The tradeoff is a heavier app that always works offline rather than a small app that needs internet to install dependencies.
+<br></br>
 
 ## Philosopher's Stone
 
-Stone mode hides a source file inside one of several host formats. The output is a real, working file of its host type — opens in the appropriate viewer, plays in the appropriate player — and Vitriol can recover the original bytes from it byte-for-byte.
+Philosopher's Stone mode enables going above and behyond _**Typical Conversion**_ 
+allowing the conversion of one media type to another, 
+hiding the source file inside one of several host formats. The output is a real, 
+working file of its host type — opens in the appropriate viewer, 
+plays in the appropriate player. Vitriol can recover the original bytes
+from the host file byte-for-byte at any time, so important data can travel disguised as ordinary media.
+
+Unlike most steganography tools, Vitriol does **not** require a user-supplied
+carrier file. For cross-category conversions, the carrier is generated
+deterministically from the source — when the output is an image of a fractal
+or an audio file of generated music, that fractal or music IS Vitriol's
+output, with the source data woven into its lowest bits. For same-category
+conversions, the source itself serves as the carrier.
+
+Optional **AES-256 password protection** encrypts the embedded payload — without
+the password, recovery of the original bytes is computationally infeasible
+even with Vitriol in hand. (See Below)
+
+---
+
+## 
+**Steganalysis caveat: Vitriol's embedding is not designed to defeat
+adversarial deep-learning steganalyzers. Casual file-content inspection,
+statistical noise comparison, and standard "does this image look like a
+fractal?" sanity checks will not surface the payload, but a determined
+analyst running modern CNN-based detectors tuned to LSB-class embeddings
+may be able to flag that hidden data is present (though not recover it
+without the password). Treat Vitriol as plausible-deniability against
+casual inspection plus strong cryptographic protection of the contents,
+not as forensic-grade undetectability.**
+
+--- 
+
+<br></br>
+
+<div align="center">
+
+## Available Formats
 
 | Host format | What you get |
 |---|---|
@@ -66,7 +150,12 @@ Stone mode hides a source file inside one of several host formats. The output is
 | `.zip` | A standard ZIP archive containing the original file. Opens in any unzip tool. |
 | `.ply`, `.obj`, `.glb` | A 3D model file. Opens in Blender, MeshLab, or any glTF viewer. |
 
+</div>
+
 Lossy formats (jpg, mp3, mp4, etc.) cannot be Stone sources — only lossless data round-trips meaningfully. `.zip` and `.exe` sources auto-engage Stone (they have no other purpose in Vitriol). Vitriol refuses `.py` ↔ `.py`, `.py` ↔ `.exe`, and `.exe` ↔ `.exe` conversions to prevent the tool from being used as a malware wrapper.
+
+
+<br></br>
 
 ### Password protection
 
@@ -82,6 +171,8 @@ Wrong-password behavior depends on the host type. Two distinct designs for two t
 ### Verify Round-Trip
 
 Optional safety toggle in the top bar. With it on, every Stone conversion immediately runs in reverse into a temp folder, and the output is only committed if the reverse produces bytes matching the original input. If they don't match, the output is discarded and the row is marked failed. Catches end-to-end integrity issues before they reach disk.
+
+<br></br>
 
 ### Samples
 
@@ -112,6 +203,8 @@ Each output is a real working file of its host type — the `.png` opens in any 
 
 Stone conversions can be chained for additional depth. Save a file as a `.png`, drop the `.png` back in and save it as a `.wav`, then the `.wav` as an `.mkv`, and so on. Each layer can carry its own password — recovering the original means unwrapping every layer in reverse order with the right password at each step. Forgetting any one password breaks the chain. Used sparingly this is a heavy increase in protection at the cost of file size and recovery effort.
 
+<br></br>
+
 ## Markdown bundles (rich-format conversions)
 
 When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output:
@@ -134,6 +227,8 @@ The `.md` references images by relative paths (`![alt](images/image1.png)`). Pur
 - **PDF read** handles uncompressed and FlateDecode streams. Encrypted PDFs and image-only (scanned, non-OCR) PDFs are not supported.
 - **3D conversions** preserve geometry by default. When the source has animation/rig data AND the target format can carry it (`.fbx`, `.dae`, `.glb`, `.gltf`), Vitriol asks once — Yes attempts to preserve animations through the export (best-effort; outcome depends on the format pair), No strips them cleanly for predictable static-geometry output. Targets that can't carry animations by spec (`.obj`, `.stl`, `.ply`, `.3ds`) skip the prompt and always export geometry only.
 
+<br></br>
+
 ## License
 
 **Elastic License** — see [LICENSE](LICENSE).
@@ -145,6 +240,8 @@ The Elastic License is **source-available**, not OSI-approved open source. You m
 - Move, change, disable, or circumvent any license-key functionality (when added in future versions).
 
 Modifications must be marked as such. See LICENSE for the full text and definitions.
+
+<br></br>
 
 ### Third-party components
 
