@@ -92,17 +92,19 @@ The [`samples/`](samples) folder ships with three source files and the Stone out
   &nbsp;&nbsp;
   <a href="samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png"><img src="samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png" alt="Stone PNG hiding The Raven PDF" width="180"/></a>
   &nbsp;&nbsp;
-  <a href="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.png"><img src="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.png" alt="Stone PNG hiding a Chopin nocturne" width="180"/></a>
+  <a href="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20password%20free.png"><img src="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20password%20free.png" alt="Stone PNG hiding a Chopin nocturne (no password)" width="180"/></a>
+  &nbsp;&nbsp;
+  <a href="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.png"><img src="samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.png" alt="Stone PNG hiding a Chopin nocturne (password-protected)" width="180"/></a>
 </p>
 <p align="center">
-  <sub><em>Three Stone-mode PNGs — a zip of audio, a PDF, and an m4a recording — all hidden inside ordinary-looking images. Click any one to view full size, then drop it into Vitriol to recover the original file.</em></sub>
+  <sub><em>Four Stone-mode PNGs — a zip of audio, a PDF, and the same Chopin nocturne hidden twice (the third image is unencrypted, the fourth is encrypted with the password <code>Chopin</code>). Same source, different password, completely different image: the encryption is baked into the carrier itself. Click any image to view full size, then drop it into Vitriol to recover the original file.</em></sub>
 </p>
 
 | Source | Stone outputs |
 |---|---|
-| [`Sample Music Zip.zip`](samples/Sample%20Music%20Zip.zip) — a zip archive of audio files | [`.png`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png) · [`.wav`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.wav) · [`.py`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.py) |
-| [`The Raven By Edgar Allan Poe.pdf`](samples/The%20Raven%20By%20Edgar%20Allan%20Poe%20.pdf) | [`.png`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png) · [`.wav`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.wav) · [`.mkv`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.mkv) · [`.py`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.py) |
-| [`Chopin - Nocturne Op. 9, No. 2.m4a`](samples/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.m4a) | [`.png`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20(Password%20is%20Chopin).png) · [`.py`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.py) · [`.exe`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.exe) — password: `Chopin` |
+| [`Sample Music Zip.zip`](samples/Sample%20Music%20Zip.zip) — a zip archive of audio files | [`.png`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.png) · [🔊 Listen `.wav`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.wav) · [`.py`](samples/Sample%20Music%20Outputs/Sample%20Music%20Zip.py) |
+| [`The Raven By Edgar Allan Poe.pdf`](samples/The%20Raven%20By%20Edgar%20Allan%20Poe%20.pdf) | [`.png`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.png) · [🔊 Listen `.wav`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.wav) · [`.mkv`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.mkv) · [`.py`](samples/The%20Raven%20Outputs/The%20Raven%20By%20Edgar%20Allan%20Poe%20.py) |
+| [`Chopin - Nocturne Op. 9, No. 2.m4a`](samples/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.m4a) — [🔊 Listen to source](samples/Chopin%20-%20Nocturne%20Op.%209%2C%20No.%202%20in%20E-flat%20major.m4a) | [`.png` (no password)](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20password%20free.png) · [`.png` (password)](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.png) · [`.py`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.py) · [`.exe`](samples/Chopin%20-%20Nocturne%20Outputs/Chopin%20-%20Nocturne%20Op.%209%20%28Password%20is%20Chopin%29.exe) — password: `Chopin` |
 
 Each output is a real working file of its host type — the `.png` opens in any image viewer, the `.wav` plays in any audio player, the `.mkv` plays in any video player, the `.py` runs with `python file.py`, and the `.exe` runs by double-click on Windows.
 
@@ -124,7 +126,6 @@ desired_output_location/
 ```
 
 The `.md` references images by relative paths (`![alt](images/image1.png)`). Pure-text conversions still produce a flat `.md`. The reverse direction (md → docx) reads this structure if present and re-embeds the images.
-
 
 ## Scope notes / known limits
 
