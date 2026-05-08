@@ -32,6 +32,16 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
+; Windows PE-level version metadata for the setup .exe itself.
+; Without these, the installer file shows FileVersion 0.0.0.0 in the
+; Properties pane even though AppVersion is set correctly. Inno needs
+; a 4-part version (X.X.X.X) here, so we suffix .0 to AppVersion.
+VersionInfoVersion={#AppVersion}.0
+VersionInfoProductVersion={#AppVersion}.0
+VersionInfoProductName={#AppName}
+VersionInfoDescription={#AppName} Setup
+VersionInfoCompany={#AppPublisher}
+VersionInfoCopyright=Copyright (C) 2026 {#AppPublisher}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
