@@ -23,7 +23,11 @@
 
 ## What it does
 
-Vitriol converts files between formats across five categories:
+Vitriol converts files between formats across five categories — **text, images, audio, video, and 3D models** — about 60 input formats and 50 output formats covered.
+
+It also includes a feature called **Philosopher's Stone**: drop any lossless file in, get back an output that looks like an ordinary image, audio file, video, archive, or self-extracting script — but contains the original bytes inside, recoverable byte-exact through Vitriol. Optional password protection (AES-256). Optional Verify Round-Trip safety check that refuses to commit an output unless the reverse conversion produces the original.
+
+### Format support
 
 - **Text** — txt, md, html, json, xml, yaml, ini, log, csv, tsv, xlsx, docx, pdf, epub, rtf, pptx, odt
 - **Images** — png, jpg, webp, bmp, tiff, gif, ico, tga, ppm/pgm/pbm, dds, heic, svg
@@ -31,78 +35,57 @@ Vitriol converts files between formats across five categories:
 - **Video** — mp4, mkv, webm, avi, mov, wmv, flv, mpg, 3gp, ts, vob, ogv
 - **3D models** — glb, gltf, obj, stl, fbx, ply, dae, 3ds
 
-Plus a **Philosopher's Stone** mode that hides any file losslessly inside a host container — image (PNG, BMP), audio (WAV, AIFF, FLAC, M4A), video (MKV), text (TXT), 3D model (PLY, OBJ, GLB), archive (ZIP), self-extracting Python script (.py), or self-extracting Windows executable (.exe) — and recovers it byte-exact. Includes an optional **Verify Round-Trip** check that hashes both directions and only commits the output if they match, and an optional per-row password that AES-256-CTR-encrypts the embedded payload.
-
 ## Install & run
 
 ```
 python launcher.py
 ```
 
-That's the entire setup. The launcher is autonomous — on first launch it:
+That's the entire setup. On first launch the launcher installs four Python packages (`PySide6`, `Pillow`, `striprtf`, `cryptography`), downloads FFmpeg + Assimp + bundled fonts to local folders, probes for hardware video encoders, and hands off to the main app. Subsequent launches are instant.
 
-1. Installs the four required Python packages (`PySide6`, `Pillow`, `striprtf`, `cryptography`) via pip.
-2. Downloads FFmpeg, Assimp, DejaVu Sans, and Cinzel Regular from official upstream sources to `bin/` and `resources/`.
-3. Probes FFmpeg for hardware encoders (NVENC / QuickSync / AMF / VideoToolbox) and caches the result.
-4. Hands off to `main.py`.
-
-Subsequent launches skip the downloads. End users never need Python installed system-wide once the launcher is packaged with PyInstaller.
+When packaged as the installer (`VitriolSetup-x.y.z.exe` from `tools/build_installer.py`), end users don't need Python at all — everything is bundled.
 
 ## Philosophy
 
-Only **PySide6**, **Pillow**, **striprtf**, and **cryptography** as Python dependencies. **FFmpeg** as a subprocess and **Assimp** via `ctypes` as the only native binaries. Everything else — docx / xlsx / pptx / epub / pdf / markdown / charset detection / 3D bindings / dependency management — is recoded from the standard library.
+Vitriol is **offline-first**. Everything runs locally — no telemetry, no network calls during conversions, no third-party APIs. The launcher fetches FFmpeg and Assimp from their official sites once, then never touches the network again.
 
-The trade-off is a heavier app that always works offline, rather than a light app that needs internet to install 200 packages.
+Minimal dependencies: four Python packages, two native binaries (FFmpeg, Assimp). Everything else — docx, xlsx, pptx, epub, pdf, markdown, charset detection — is implemented from the standard library. The tradeoff is a heavier app that always works offline rather than a small app that needs internet to install dependencies.
 
-## Top-bar toggles
+## Philosopher's Stone
 
-**Philosopher's Stone** (off by default; persists across sessions). When on, the per-row target dropdown expands to include byte-passthrough hosts: `.wav`, `.png`, `.bmp`, `.txt`, `.mkv`, `.py`, `.exe`, `.zip`, `.ply`, `.obj`, `.glb`, `.aiff`, `.flac`, `.m4a`. Lossy source formats (jpg, mp3, mp4, etc.) are excluded — only lossless data passes through the Stone. `.zip` and `.exe` sources auto-engage Stone (they have no non-Stone meaning in Vitriol). `.py` ↔ `.py`, `.py` ↔ `.exe`, and `.exe` ↔ `.exe` are blocked by the malware-pipeline guard — Vitriol refuses to wrap auto-execute formats in other auto-execute formats.
+Stone mode hides a source file inside one of several host formats. The output is a real, working file of its host type — opens in the appropriate viewer, plays in the appropriate player — and Vitriol can recover the original bytes from it byte-for-byte.
 
-| Host | Container | Notes |
-|---|---|---|
-| `.wav` | RIFF/WAVE PCM, envelope is the data chunk | Plays as static audio (same-category) or as music (cross-category — see Aesthetic Stone below) |
-| `.png` | Pixel-data envelope (UCMSv2) | Solid-color image (same-category) or Mandelbrot fractal (cross-category) |
-| `.bmp` | 24-bit pixel-data envelope | Same dual mode as PNG |
-| `.txt` | Base64-wrapped envelope, no header | Looks like an ordinary base64 dump |
-| `.mkv` | Matroska + rawvideo rgb24, 1024×1024 @ 42 fps | Plays as static video. Requires FFmpeg |
-| `.py` | Self-extracting Python script | `python file.py` reconstructs the original. With a password set, the script prompts for it at run time, AES-CTR-decrypts, and self-deletes after either success or 5 wrong-password attempts. The actual rebuild logic + counter math is hidden inside an encrypted inner runtime; the visible loader is just bootstrap |
-| `.exe` | Self-extracting Windows executable | Pre-compiled Python stub binary (~12 MB) with the same `.py` runtime appended after a `TMUTSTUB-PAYLOAD\x00` magic marker. End users don't need Python installed. Same password / counter / self-delete behavior as `.py`. Frozen-exe self-delete uses a deferred batch file to bypass Windows's exclusive-lock-on-running-exe |
-| `.zip` | Transparent ZIP archive containing a single member named `original.<ext>` | Opens in any unzip tool; member preserves the original filename and bytes. Cheap detection: ZIP namelist scan |
-| `.ply` / `.obj` | ASCII 3D-model header with envelope in `comment` lines | Loads in MeshLab / Blender / Open3D as a degenerate single-vertex mesh |
-| `.glb` | Binary glTF with custom `ucMs` chunk after JSON+BIN | Loads in any glTF viewer; the chunk is spec-compliant (readers must ignore unknown chunks) |
-| `.aiff` | Apple/IFF audio (FORM/COMM/SSND, big-endian PCM) | Same dual mode as WAV |
-| `.flac` | Lossless FLAC via FFmpeg | Cross-category outputs are music-mode WAV re-encoded to FLAC |
-| `.m4a` | ALAC (Apple Lossless) via FFmpeg | Cross-category only — same-category audio→m4a routes through the regular media pipeline |
+| Host format | What you get |
+|---|---|
+| `.png`, `.bmp` | An image. Same-category sources produce a passthrough image; cross-category sources produce a deterministic colored fractal. |
+| `.wav`, `.aiff`, `.flac`, `.m4a` | An audio file. Same-category sources are normal audio; cross-category sources sound like generated music. |
+| `.mkv` | A video file. Plays in any video player. Requires FFmpeg. |
+| `.txt` | A text file with base64-style content. |
+| `.py` | A self-extracting Python script. Run `python file.py` and it reconstructs the original. |
+| `.exe` | A self-extracting Windows executable. End users don't need Python. |
+| `.zip` | A standard ZIP archive containing the original file. Opens in any unzip tool. |
+| `.ply`, `.obj`, `.glb` | A 3D model file. Opens in Blender, MeshLab, or any glTF viewer. |
 
-### Aesthetic Stone (cross-category outputs)
+Lossy formats (jpg, mp3, mp4, etc.) cannot be Stone sources — only lossless data round-trips meaningfully. `.zip` and `.exe` sources auto-engage Stone (they have no other purpose in Vitriol). Vitriol refuses `.py` ↔ `.py`, `.py` ↔ `.exe`, and `.exe` ↔ `.exe` conversions to prevent the tool from being used as a malware wrapper.
 
-When Philosopher's Stone is on AND the conversion crosses categories (e.g. `.pdf → .png`, `.txt → .wav`), the output gets aesthetic treatment:
+### Password protection
 
-- **Image targets** (`.png`, `.bmp`) render as **deterministic colored Mandelbrot fractals**. The source bytes hide in the bottom bit of each pixel byte (1 bit per channel = 3 bits per pixel). The top 7 bits per channel hold a real fractal at 128 levels per channel — perceptually identical to a "pure" fractal rendering. Output passes statistical "is this a real fractal?" tests: pixel compression ratio drops to ~0.03 (real fractals are 0.05–0.3, random noise is ~1.0). Each source picks one of 65 hand-curated viewports across the Mandelbrot boundary and one of 6 color-cycling palette algorithms (sin-wave, HSV cycle, two-color gradient, three-anchor blend, log ramp, inverted) — same source always produces the same image, different sources produce visibly distinct fractals.
-- **Audio targets** (`.wav`, `.aiff`, `.flac`) get **music-like sample data** — generated chord progressions in a key/tempo/progression deterministically chosen from the envelope header — with the source bytes packed into the bottom 4 bits of each 16-bit sample. Output is ~1.5–2× source size for compressible inputs, ~3–4× for already-compressed inputs.
+Each row in the playlist has an optional password (🔓 / 🔒 lock icon next to the save path). When set, the embedded payload is encrypted with **AES-256-CTR** under a key derived from your password via **PBKDF2-HMAC-SHA256**. Without the right password, the file does not decode.
 
-Both features preserve byte-perfect round-trip. Same-category Stone (e.g. `.png → .png`, `.mp3 → .wav`) is unchanged.
+Wrong-password behavior depends on the host type. Two distinct designs for two threat models:
 
-### Stone encryption (per-row password)
+- **Image, audio, video, 3D, text, zip outputs** — wrong password produces silent garbage. There is no error message; the file gives no signal that encryption was used at all. Same-format outputs look identical whether they're password-protected or not. This preserves a *no-oracle* property: someone probing files cannot tell "right password produced wrong file" from "wrong password produced garbage."
+- **Self-extracting `.py` and `.exe`** — these are interactive, so they print `Wrong password. X/5 attempts used.` After 5 wrong attempts the file invalidates itself and self-deletes.
 
-Every Stone v3 envelope is **encrypted with AES-256-CTR** under a key derived from PBKDF2-HMAC-SHA256 (200,000 iterations). The same envelope encrypts payloads inside PNG, BMP, MKV, music-mode WAV / AIFF / FLAC / M4A, the inner runtime of self-extracting `.py` and `.exe`, and 3D model hosts (PLY, OBJ, GLB) when used cross-category. With no user password, the key derives from an empty password — anyone with Vitriol can decode (same exposure level as the older non-encrypted Stone). With a user password set on a row (via the 🔓/🔒 lock icon next to the save-path field), only the same password decodes the file.
+**Forgetting a password means the file is unrecoverable.** Vitriol never stores, logs, or persists passwords. They live in the playlist row's memory and are gone the moment you remove the row or close the app.
 
-The round-trip is purely mechanical: `WAV1 + "paper" → PNG1`, then `PNG1 + "paper" → WAV2` produces `WAV2 == WAV1` byte-for-byte.
+### Verify Round-Trip
 
-**Wrong-password behavior depends on host type.** This is intentional — different threat models for different hosts:
+Optional safety toggle in the top bar. With it on, every Stone conversion immediately runs in reverse into a temp folder, and the output is only committed if the reverse produces bytes matching the original input. If they don't match, the output is discarded and the row is marked failed. Catches end-to-end integrity issues before they reach disk.
 
-- **PNG / BMP / WAV / AIFF / FLAC / M4A / MKV / PLY / OBJ / GLB** (passive media envelopes) — wrong password produces **garbage output silently**. There is no "incorrect password" message, and Vitriol does not detect that encryption was used. The format itself is the only key. Every Stone file of these types looks structurally identical to every other Stone file; the bytes don't reveal which use a password and which don't. This preserves the **no-oracle invariant** — an attacker probing files cannot distinguish "right password produced wrong file" from "wrong password produced garbage."
-- **`.py` / `.exe`** (self-extracting runtimes) — wrong password prints `Wrong password. X/5 attempts used.` and increments a per-file counter stored in `HKCU\Software\_872676883` (Windows) or `~/.872676883` (POSIX). The counter values themselves are HMAC-derived 32-bit magics, not raw 0–5, so a regedit user can't tell how many attempts have been used by reading the DWORD. After 5 wrong attempts, the file self-deletes and is invalidated. This trades the no-oracle property for a hard rate-limit appropriate to interactive runtimes.
+## Markdown bundles (rich-format conversions)
 
-**Forgetting a password means the file is unrecoverable.** Vitriol does not store, log, or persist passwords. They live in widget memory only and are forgotten when the row is removed or Stone mode is toggled off.
-
-**Verify Round-Trip** (only available with Philosopher's Stone on). After each conversion, immediately runs the reverse direction into a temp folder, hashes both files, and only commits the output if `sha256(reverse(forward(src))) == sha256(src)`. The temp folder is cleaned up on success, on verification failure, and on app exit.
-
-**Tamper detection on `.py` / `.exe`.** The encrypted self-extracting runtime checks its own integrity twice before writing the recovered file: a SHA-256 of the file's stable bytes (everything except the encrypted runtime block itself) is baked into the inner runtime at embed time and re-verified at extraction; and the decrypted payload is re-hashed and compared to the embedded payload hash before being written to disk. Any modification to the file fails one or both checks, and the recovered file is never written.
-
-## Bundle output for Markdown
-
-When converting a rich format with images (docx → md, pdf → md, epub → md, pptx → md), the markdown writer detects embedded images and switches to a folder-structured output:
+When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output:
 
 ```
 desired_output_location/
@@ -113,51 +96,21 @@ desired_output_location/
            image2.jpg
 ```
 
-The `.md` references images via `![alt](images/image1.png)` (relative paths). Pure-text conversions still produce a flat `.md`. The reverse direction (md → docx) consumes this structure if present, embedding images back into the docx.
-
-## Project layout
-
-```
-launcher.py                    # PyInstaller-bundled wrapper (deps + hw probe + spawn main.py)
-main.py                        # Entry point invoked by the launcher
-theme.qss                      # Dark theme
-tools/
-    generate_icons.py          # Render logo.svg to PNG sizes + multi-resolution .ico
-app/
-    ui/                        # PySide6 widgets (main window, playlist, drop zone,
-                               #     border frame, vignette overlay, status glyph)
-    core/                      # Conversion queue, router, IRs, file detector, downloader
-    format_handlers/           # One module per format family (incl. masquerade engine)
-    utils/                     # Paths, logger, cancellation, settings
-resources/
-    logo.svg                   # App logo (transmutation circle)
-    gem.svg                    # Toggle gem icon
-    hex-empty.svg              # Topbar toggle indicator (off)
-    hex-filled-red.svg         # Stone toggle indicator (on)
-    hex-filled-purple.svg      # Verify toggle indicator (on)
-    icons/                     # Generated PNG sizes + logo.ico (run tools/generate_icons.py)
-    fonts/                     # Auto-fetched Cinzel-Regular.ttf
-    DejaVuSans.ttf             # Auto-fetched (PDF Unicode)
-bin/                           # FFmpeg + Assimp DLL + hw_encoders.json (gitignored)
-wheels/                        # Optional offline pip wheels (gitignored)
-output/                        # Default output directories per category
-```
+The `.md` references images by relative paths (`![alt](images/image1.png)`). Pure-text conversions still produce a flat `.md`. The reverse direction (md → docx) reads this structure if present and re-embeds the images.
 
 ## Customization
 
-- **Theme** — edit `theme.qss`. The `{RES}` placeholder is substituted with the absolute path to `resources/` at load time, so QSS rules can reference SVG assets via `image: url({RES}/...)`.
-- **Hardware encoders** — automatic. The result of `ffmpeg -encoders` is cached at `bin/hw_encoders.json` and refreshed whenever the FFmpeg binary's mtime changes. No UI toggle.
-- **Settings** — persisted at `%LOCALAPPDATA%/Vitriol/settings.json` on Windows. Currently tracks the two top-bar toggles.
-- **Logo** — edit `resources/logo.svg`, then re-run `python tools/generate_icons.py` to regenerate the PNG sizes and `.ico`.
+- **Theme** — edit `theme.qss`. The `{RES}` placeholder is substituted with the resources directory at load time, so QSS rules can reference assets like `image: url({RES}/icon.svg)`.
+- **Hardware encoders** — auto-detected. Result is cached and refreshed when the FFmpeg binary updates. No UI toggle.
+- **Settings** — persisted at `%LOCALAPPDATA%/Vitriol/settings.json` on Windows.
+- **Logo** — edit `resources/logo.svg`, then run `python tools/generate_icons.py` to regenerate the icon set.
 
-## Scope notes
+## Scope notes / known limits
 
-- PPTX and ODT are read-only.
-- RTF reads via [striprtf](https://github.com/joshy/striprtf); RTF write is not supported.
-- SVG is read-only via QtSvg's SVG Tiny 1.2 implementation.
-- PDF write supports headings, paragraphs, lists, basic tables, and image placeholders. With DejaVu Sans bundled, the writer emits CID-keyed Type0 fonts with full Latin Extended + Cyrillic + Greek coverage.
-- PDF read parses uncompressed and FlateDecode streams. Encrypted PDFs and image-only PDFs (which would need OCR) are not supported.
-- 3D conversions preserve geometry only — animations are dropped.
+- **Read-only formats:** PPTX, ODT, SVG, RTF write (RTF read works via striprtf).
+- **PDF write** supports headings, paragraphs, lists, basic tables, and image placeholders. Bundled DejaVu Sans gives Latin Extended + Cyrillic + Greek coverage.
+- **PDF read** handles uncompressed and FlateDecode streams. Encrypted PDFs and image-only (scanned, non-OCR) PDFs are not supported.
+- **3D conversions** preserve geometry only — animations and skeletons are dropped.
 
 ## License
 
