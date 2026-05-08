@@ -12,7 +12,9 @@
 <p align="center">
 <em>Visit the interior of the earth; by rectification you will find the hidden stone.
 </p>
+
 ---
+
 <p align="center">
   <em>A self-contained, offline-first desktop file converter for text, audio, video, image, and 3D model formats.</em>
 </p>
