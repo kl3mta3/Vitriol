@@ -125,18 +125,17 @@ even with Vitriol in hand. (See Below)
 ---
 
 ## 
-**Steganalysis caveat: Vitriol's embedding is not designed to defeat
-adversarial deep-learning steganalyzers. 
+**Steganalysis caveat: Vitriol's embedding is not designed to defeat adversarial deep-learning steganalyzers.** 
 
-<p>Casual file-content inspection,
+</p>
+**Casual file-content inspection,
 statistical noise comparison, and standard "does this image look like a
 fractal?" sanity checks will not surface the payload, but a determined
 analyst running modern CNN-based detectors tuned to LSB-class embeddings
 may be able to flag that hidden data is present (though not recover it
 without the password). Treat Vitriol as plausible-deniability against
 casual inspection plus strong cryptographic protection of the contents,
-not as forensic-grade undetectability.</p>
-**
+not as forensic-grade undetectability. </p>**
 
 --- 
 
