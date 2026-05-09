@@ -186,6 +186,23 @@ def find_ffprobe() -> "Path | None":
     return Path(found) if found else None
 
 
+def find_pandoc() -> "Path | None":
+    """Locate the pandoc binary. Same lookup order as ffmpeg/assimp.
+    Pandoc is auto-fetched by launcher.py into bin_dir() on first launch."""
+    import shutil
+    name = "pandoc.exe" if os.name == "nt" else "pandoc"
+    dirs = [bin_dir()]
+    repo = _repo_bin_dir()
+    if repo is not None:
+        dirs.append(repo)
+    for d in dirs:
+        c = d / name
+        if c.exists():
+            return c
+    found = shutil.which("pandoc")
+    return Path(found) if found else None
+
+
 def find_assimp() -> "Path | None":
     """Locate the Assimp DLL/SO. Honors UC_ASSIMP_DIR (set by launcher)
     plus the legacy ASSIMP_DLL / ASSIMP_PATH env overrides."""
