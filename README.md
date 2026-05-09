@@ -27,17 +27,30 @@
 
 ## What it does
 
-Vitriol converts files between formats across five categories — **text, images, audio, video, and 3D models** — about 60 input formats and 50 output formats covered.
+Vitriol converts files between formats across **eleven categories** — documents, data, images, audio, video, 3D models, archives, ebooks, subtitles, fonts, and X.509 crypto material — covering ~150 file extensions and several thousand conversion pairs.
 
 It also includes a feature called **Philosopher's Stone**: drop any lossless file in, get back an output that looks like an ordinary image, audio file, video, archive, or self-extracting script — but contains the original bytes inside, recoverable byte-exact through Vitriol. Optional password protection (AES-256). Optional Verify Round-Trip safety check that refuses to commit an output unless the reverse conversion produces the original.
 
 ### Format support
 
-- **Text** — txt, md, html, json, xml, yaml, ini, log, csv, tsv, xlsx, docx, pdf, epub, rtf, pptx, odt
-- **Images** — png, jpg, webp, bmp, tiff, gif, ico, tga, ppm/pgm/pbm, dds, heic, svg
-- **Audio** — mp3, wav, flac, ogg, opus, m4a, aac, wma, aiff, alac, ac3, amr, au, mka
-- **Video** — mp4, mkv, webm, avi, mov, wmv, flv, mpg, 3gp, ts, vob, ogv
+- **Documents (markup)** — md, html, rst, org, muse, textile, adoc, ipynb, opml, djot, tex, txt, xml, py
+- **Documents (office)** — docx, pdf, epub, rtf, odt, pptx
+- **Documents (wiki/markup)** — mediawiki, dokuwiki, jira, creole, vimwiki, twiki, tikiwiki, xwiki, zimwiki
+- **Documents (technical)** — man, ms, texinfo, haddock, docbook, jats, tei, fb2, typst
+- **Documents (slides)** — beamer, revealjs, slidy, slideous, s5, dzslides
+- **Documents (bibliography)** — bibtex, biblatex, csljson, ris, endnote
+- **Data** — csv, tsv, xlsx, parquet, feather, orc, json, jsonl, yaml, toml, ini, env, vcf
+- **Images** — png, jpg, webp, bmp, tiff, gif, ico, tga, dib, msp, pcx, apng, avif, heic, heif, jxl, jp2, qoi, icns, sgi, pfm, pnm, ppm/pgm/pbm, dds, xbm, svg, plus read-only blp, cur, dcx, eps, fli/flc, mpo, psd, xpm
+- **Audio** — mp3, wav, flac, ogg, opus, m4a, aac, wma, aiff, alac, ac3, amr, au, mka, oga, mp2
+- **Video** — mp4, mkv, webm, avi, mov, wmv, flv, mpg, mpeg, 3gp, ts, m4v, asf, f4v, vob, ogv
 - **3D models** — glb, gltf, obj, stl, fbx, ply, dae, 3ds
+- **Archives** — zip, 7z, tar, tar.gz, tar.bz2, tar.xz, tar.zst (rar read-only)
+- **Comic books** — cbz, cb7 (cbr read-only)
+- **Subtitles** — srt, vtt, ass, ssa, sub, mpl
+- **Fonts** — otf, ttf, woff, woff2
+- **X.509 crypto** — pem, crt, cer, key, der
+
+The wider document/markup family (rst, org, ipynb, latex, docbook, mediawiki, beamer, etc.) is handled by [Pandoc](https://pandoc.org/), which the launcher auto-fetches on first run. The same launcher also pulls FFmpeg (audio/video) and Assimp (3D) — everything is bundled or fetched, no manual setup.
 
 <br></br>
 
@@ -64,7 +77,7 @@ or
 Launcher.py
 ```
 
-That's the entire setup. On first launch the launcher installs four Python packages (`PySide6`, `Pillow`, `striprtf`, `cryptography`), downloads FFmpeg + Assimp + bundled fonts to local folders, probes for hardware video encoders, and hands off to the main app. Subsequent launches are instant.
+That's the entire setup. On first launch the launcher installs the Python packages (`PySide6`, `Pillow` + AVIF/HEIF/JXL plugins, `pyarrow`, `fonttools`, `py7zr`, `cryptography`, and a handful of others — full list at the top of `launcher.py`), downloads FFmpeg + Assimp + Pandoc + bundled fonts to local folders, probes for hardware video encoders, and hands off to the main app. Subsequent launches are instant.
 
 ---
 
@@ -158,7 +171,8 @@ not as forensic-grade undetectability.**
 | `.txt` | A text file with base64-style content. |
 | `.py` | A self-extracting Python script. Run `python file.py` and it reconstructs the original. |
 | `.exe` | A self-extracting Windows executable. End users don't need Python. |
-| `.zip` | A standard ZIP archive containing the original file. Opens in any unzip tool. |
+| `.zip`, `.7z` | A standard archive containing the original file as a single member. Opens in any unzip / 7-Zip tool. |
+| `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst` | A standard tarball (compressed or not) containing the original file as a single member. Opens in any tar tool. |
 | `.ply`, `.obj`, `.glb` | A 3D model file. Opens in Blender, MeshLab, or any glTF viewer. |
 
 </div>
@@ -216,6 +230,14 @@ Stone conversions can be chained for additional depth. Save a file as a `.png`, 
 
 <br></br>
 
+## Bulk actions
+
+The playlist's bottom bar has four bulk actions:
+
+- **Convert All / Convert Selected** — kicks off the conversion queue.
+- **Download Selected** — bundles every completed (✅) row's output into a single `.zip` you pick a save location for. Useful when a batch produces dozens of small files and you'd rather hand off one archive than rummage through the output folder.
+- **Remove Selected / Clear Playlist** — what they say.
+
 ## Markdown bundles (rich-format conversions)
 
 When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output:
@@ -265,11 +287,18 @@ Modifications must be marked as such. See LICENSE for the full text and definiti
 
 - [PySide6](https://doc.qt.io/qtforpython-6/) — LGPL v3
 - [Pillow](https://pillow.readthedocs.io/) — MIT-CMU
+- [pillow-avif-plugin](https://github.com/fdintino/pillow-avif-plugin), [pillow-heif](https://github.com/bigcat88/pillow_heif), [pillow-jxl-plugin](https://pypi.org/project/pillow-jxl-plugin/) — MIT / BSD-3 / Apache-2.0
+- [pyarrow](https://arrow.apache.org/docs/python/) — Apache 2.0 (parquet/feather/orc)
+- [fonttools](https://github.com/fonttools/fonttools) + [brotli](https://github.com/google/brotli) — MIT (otf/ttf/woff/woff2)
+- [py7zr](https://github.com/miurahr/py7zr) + [zstandard](https://github.com/indygreg/python-zstandard) — LGPL-2.1+ / BSD-3 (archives)
+- [tomli-w](https://github.com/hukkin/tomli-w), [PyYAML](https://pyyaml.org/) — MIT
 - [striprtf](https://github.com/joshy/striprtf) — BSD 3-Clause
-- [cryptography](https://cryptography.io/) — Apache 2.0 / BSD 3-Clause
-- [FFmpeg](https://www.ffmpeg.org/) (auto-fetched) — LGPL v2.1+ for the gyan.dev essentials build; see the FFmpeg README for codec licenses
-- [Assimp](https://www.assimp.org/) (auto-fetched) — BSD 3-Clause
+- [cryptography](https://cryptography.io/) — Apache 2.0 / BSD 3-Clause (Stone AES-256 + PEM/CRT/KEY conversions)
+- [pdfminer.six](https://github.com/pdfminer/pdfminer.six) — MIT (PDF read)
+- [FFmpeg](https://www.ffmpeg.org/) (auto-fetched binary) — LGPL v2.1+ for the gyan.dev essentials build; see the FFmpeg README for codec licenses
+- [Assimp](https://www.assimp.org/) (auto-fetched binary) — BSD 3-Clause
+- [Pandoc](https://pandoc.org/) (auto-fetched binary) — GPL v2+ — universal document converter; powers ~50 markup/document/wiki/slide/bibliography formats
 - [DejaVu Sans](https://dejavu-fonts.github.io/) (auto-fetched) — Bitstream Vera + DejaVu Public Domain
 - [Cinzel](https://fonts.google.com/specimen/Cinzel) (auto-fetched) — SIL Open Font License 1.1
 
-The launcher fetches these from their official upstream sources over HTTPS on first run, if missing. SHA-256 verification is supported per release; see the constants at the top of `launcher.py` to lock specific versions before shipping.
+The launcher fetches the binary components (FFmpeg, Assimp, Pandoc, fonts) from their official upstream sources over HTTPS on first run, if missing. SHA-256 verification is supported per release; see the constants at the top of `launcher.py` to lock specific versions before shipping.
