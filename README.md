@@ -240,7 +240,7 @@ The playlist's bottom bar has four bulk actions:
 
 ## Markdown bundles (rich-format conversions)
 
-When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output:
+When converting docx / pdf / epub / pptx → md, the markdown writer detects embedded images and produces a folder-structured output: 
 
 ```
 desired_output_location/
