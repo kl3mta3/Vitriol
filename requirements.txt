@@ -3,3 +3,16 @@ Pillow>=10.0
 striprtf>=0.0.26
 psutil>=5.9
 pdfminer.six>=20221105
+
+# Format-expansion deps
+pillow-avif-plugin>=1.4
+pillow-heif>=0.16
+pillow-jxl-plugin>=1.2
+fonttools>=4.50
+brotli>=1.1
+py7zr>=0.21
+zstandard>=0.22
+pyarrow>=15.0
+tomli-w>=1.0
+PyYAML>=6.0
+cryptography>=42.0
