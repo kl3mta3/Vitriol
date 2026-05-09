@@ -200,6 +200,16 @@ def _block_to_plain(blk: Block, depth: int) -> str:
     return ""
 
 
+def _pandoc_to_text(pd):
+    from ..format_handlers.pandoc_handler import pandoc_to_textdoc
+    return pandoc_to_textdoc(pd)
+
+
+def _text_to_pandoc(d):
+    from ..format_handlers.pandoc_handler import textdoc_to_pandoc
+    return textdoc_to_pandoc(d)
+
+
 ADAPTERS = {
     ("tabular", "text"): tabular_to_textdoc,
     ("text", "tabular"): textdoc_to_tabular,
@@ -211,6 +221,13 @@ ADAPTERS = {
     ("binary", "tabular"): lambda b: textdoc_to_tabular(
         plain_to_textdoc(b.decode("utf-8", errors="replace") if isinstance(b, (bytes, bytearray)) else str(b))
     ),
+    # Pandoc bridge: pandoc reads/writes ~50 doc formats but other handlers
+    # own md/html/docx/epub/odt/rtf/txt. The bridge routes via HTML so
+    # cross-handler conversions (rst→docx, md→rst, etc.) work, with
+    # pandoc generating clean HTML in one direction and Vitriol's HTML
+    # writer/reader in the other.
+    ("pandoc", "text"): _pandoc_to_text,
+    ("text", "pandoc"): _text_to_pandoc,
 }
 
 

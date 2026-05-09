@@ -227,6 +227,8 @@ _ADAPTER_PAIRS = {
     ("binary", "text"),
     ("tabular", "binary"),
     ("binary", "tabular"),
+    ("pandoc", "text"),
+    ("text", "pandoc"),
 }
 
 
