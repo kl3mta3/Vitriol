@@ -1,29 +1,23 @@
-"""Masquerade Mode — losslessly embed any file's bytes inside a "host"
-container that is itself a valid file in the host format.
+"""Masquerade Mode — embed any file's bytes inside a host container that
+is itself a valid file in the host format.
 
-Self-defining envelope format placed at a known position inside the host:
+Envelope format (v1):
+    magic       8 B    b"UCMSv1\\0"
+    ext_len     1 B    length of original extension (incl. leading dot)
+    ext_str     var    utf-8 of original ext, e.g. ".docx"
+    payload_len 8 B    uint64 BE
+    payload     var    original file bytes
+    pad         var    zero bytes for host structural validity
 
-    magic      8 bytes   b"UCMSv1\\0"
-    ext_len    1 byte    length of original-extension string (incl. leading dot)
-    ext_str    variable  utf-8 of original ext, e.g. ".docx"
-    payload_len 8 bytes  big-endian uint64 — original payload size in bytes
-    payload    variable  the original file bytes verbatim
-    pad        variable  zero bytes added so the host's structural rules pass
+Round-trip: embed(extract(host)) == host for hosts produced by this engine.
 
-Round-trip: embed(extract(host)) == host (byte-exact for hosts the engine
-itself produced; not necessarily for hosts an external editor mutated).
-
-Hosts implemented in v1:
-    .wav  — RIFF/WAVE PCM, envelope sits in the data chunk
-    .png  — private ancillary chunk "ucMs" carries the envelope; image is 1x1
-    .bmp  — payload appended after a 1x1 pixel block (some viewers truncate
-            view at the declared image bounds — file remains valid)
-    .txt  — base64 of the envelope (always opens cleanly in a text editor)
-    .mkv  — Matroska container with rawvideo rgb24, 1024x1024 @ 42 fps.
-            Envelope lives in the frame pixels (hybrid: MKV tags also carry
-            the metadata as inspectable hints). 42 fps is intentional — it
-            fingerprints Masquerade output for visual identification.
-            Requires FFmpeg (the launcher guarantees it is present).
+v1 hosts:
+    .wav   RIFF/WAVE PCM, envelope in the data chunk.
+    .png   Private ancillary chunk "ucMs"; image is 1x1.
+    .bmp   Payload appended after a 1x1 pixel block.
+    .txt   Base64 of the envelope.
+    .mkv   Matroska rawvideo rgb24 1024x1024 @ 42 fps; envelope in frame
+           pixels with MKV tags as hints. Requires FFmpeg.
 """
 from __future__ import annotations
 import base64
@@ -293,10 +287,8 @@ def has_envelope(path: "Path", ext: str) -> bool:
                             return True
         except (OSError, struct.error):
             pass
-    # TXT host: the envelope is base64-encoded, so MAGIC bytes don't appear
-    # in raw form. The file carries no comment header (deliberately — the
-    # output should look like an unremarkable base64 dump). Detect by
-    # attempting a base64 decode of the head and checking for MAGIC.
+    # TXT host: envelope is base64-encoded, no comment header. Detect by
+    # base64-decoding the head and looking for MAGIC.
     if ext == ".txt":
         try:
             text = head.decode("ascii", errors="strict")
@@ -1106,21 +1098,8 @@ def _mkv_v3_frame_count(envelope_size: int) -> int:
 # ---------------------------------------------------------------------------
 # Audio track for video outputs
 # ---------------------------------------------------------------------------
-# Stone-mode video outputs (.mkv / .mp4) carry a muxed audio track that:
-#   1. Closes the "silent video = obvious tell" forensic signal — real-world
-#      videos almost always have an audio stream.
-#   2. Holds a SHA-256 hash of the original source bytes at scatter positions
-#      in audio LSBs. The decoder recomputes the hash on the recovered
-#      payload and compares; mismatch = `TamperDetectedError`.
-#
-# The audio track is itself a v3 audio Stone-pack (encrypted under the same
-# password as the video envelope), with `inner = hash || padding`. This
-# makes it indistinguishable from a regular Stone-audio file and reuses the
-# entire audio synth pipeline as-is. The placeholder ext is `.bin` (the
-# decoder ignores it).
-
-# The audio track payload's placeholder extension. Decoder strips the
-# inner header and takes the first 32 bytes as the SHA-256.
+# The muxed audio track is a v3 audio Stone-pack carrying SHA-256 of the
+# source bytes; decoder recomputes and compares on extract.
 _VIDEO_AUDIO_PLACEHOLDER_EXT = ".bin"
 
 
@@ -1352,7 +1331,7 @@ def _mkv_choose_base_viewport(envelope: bytes):
     from . import _mandelbrot as _m
     base_cx, base_cy, base_hw, r_ph, g_ph, b_ph, palette_id = (
         _m.derive_seed_unjittered(envelope))
-    # Belt-and-suspenders: test the most zoomed-in frame (smallest hw).
+    # Test the most zoomed-in frame (smallest hw).
     test_hw = base_hw * _MKV_ZOOM_LO
     if not _m.viewport_is_interesting(128, 128, base_cx, base_cy, test_hw):
         base_cx, base_cy, base_hw = _m._FALLBACK_VIEWPORT
@@ -1659,29 +1638,10 @@ def _mkv_embed_to_file(src_bytes: bytes, src_ext: str, dst: Path,
                 except OSError: pass
 
 
-# ---------------------------------------------------------------------------
-# Streaming MKV embed (multi-GB OOM safety)
-# ---------------------------------------------------------------------------
-# The non-streaming `_mkv_embed_to_file` materializes ~3× the source size
-# in RAM during encrypt (plaintext + ciphertext both held). For 1 GB
-# sources that's ~3 GB peak, which OOMs on typical machines.
-#
-# Streaming embed:
-#   1. Pass 1: stream-HMAC the inner byte sequence (ext_len + ext +
-#      payload_len + source) to derive the deterministic IV. Disk I/O
-#      only, no large buffer.
-#   2. Write the envelope (header + ciphertext) to a TEMP FILE via a
-#      streaming AES-CTR encrypt. Reads source one chunk at a time.
-#   3. Memory-map the envelope tempfile. Mmap supports len() + slicing
-#      so it drops in for the existing parallel frame generator
-#      (`_video_frames_iter` slices envelope[start:end] per frame).
-#   4. Run the existing parallel-render → FFmpeg pipeline against the
-#      mmap. Workers read non-overlapping byte ranges concurrently
-#      with no contention.
-#   5. Close mmap + delete tempfile.
-# Peak RAM: chunk_size + frame buffer pool ≈ 30–50 MB regardless of
-# source size. Peak DISK: ~1× source size (the envelope tempfile).
-
+# Streaming MKV embed for sources >= 100 MB. Two-pass: HMAC source for IV,
+# then write encrypted envelope to a tempfile, mmap it, parallel-render
+# frames from the mmap, pipe to FFmpeg. Peak RAM ~30-50 MB; peak disk ~1x
+# source size.
 _MKV_STREAMING_THRESHOLD = 100 * 1024 * 1024   # >= 100 MB sources stream
 
 
@@ -1971,20 +1931,17 @@ def _mkv_v3_extract_streaming(src: "Path", password: bytes,
         key = _sc.derive_key(password)
         dec = _sc.StreamingDecryptor(key, iv)
 
-        # Inner-header buffer: collects decrypted bytes until we have
-        # the full ext_len + ext + payload_len header (1 + ext_len + 8
-        # bytes total, max 264 bytes). Once parsed, subsequent decrypted
-        # bytes are payload and stream straight to disk.
+        # Inner-header buffer: holds decrypted bytes until ext_len + ext
+        # + payload_len (max 264 B) is parsed. Subsequent decrypted bytes
+        # stream straight to disk.
         inner_buf = bytearray()
-        inner_header_size: "Optional[int]" = None  # set once known
+        inner_header_size: "Optional[int]" = None
         recovered_ext: "Optional[str]" = None
         payload_len: int = 0
         payload_bytes_written: int = 0
 
-        # We feed envelope bytes through `dec.update` chunk by chunk.
-        # `envelope_processed` tracks how many envelope bytes we've fed
-        # in, so we can stop reading frames once we've processed the
-        # whole envelope.
+        # Counter of envelope bytes fed through `dec.update` so far —
+        # used to stop reading frames once the envelope is fully consumed.
         envelope_processed = 0
 
         def _consume_envelope_chunk(env_chunk: bytes, out_fp) -> None:
@@ -2695,18 +2652,13 @@ def _mandelbrot_pack_envelope_into_fractal(envelope: bytes, fractal: bytes,
         from the encrypted ciphertext.
       - Everywhere else: zero.
 
-    Note on detection trade-offs: leaving non-scatter LSBs at their
-    "fractal-natural" value was tried and rejected — body-heavy fractals
-    (large dark/black interior regions) have natural LSB ≈ 0 across most
-    of the image, which produced a *worse* byte-0x00 anomaly than the
-    deterministic-zero approach (208× vs ~7× over uniform). Random LSB
-    fill defeats PNG/MKV compression and bloats files 5–7×. Zeroed
-    non-scatter LSBs is the dominated-by-nothing point on the
-    size/detection curve given our k=1 scatter density.
+    Non-scatter LSBs are zeroed. Random fill defeats PNG/MKV compression
+    (5-7x size). Fractal-natural LSBs over-cluster on byte-0x00 for
+    body-heavy fractals (208x vs 7x uniform).
     """
     import numpy as np
     fractal_arr = np.frombuffer(fractal, dtype=np.uint8)[:total_pixel_bytes]
-    # Clear all LSBs first; we'll OR in payload bits at scatter positions.
+    # Clear LSBs; payload bits OR'd in at scatter positions.
     out = fractal_arr & _FRACTAL_MASK
     env_len = len(envelope)
     if env_len > 0:
@@ -3207,9 +3159,8 @@ def _mandelbrot_pixel_iter(envelope: bytes, width: int, height: int,
     stride, _stride_unused = _mandelbrot_scatter_indices(num_octets)
     full_octet_idx = (np.arange(n_env, dtype=np.int64) * stride) % num_octets
 
-    # Compute the small-cap fractal once. For images larger than the cap,
-    # we'll nearest-neighbor upscale per strip (cheap, zero edge artifacts,
-    # blockier than bilinear but that's invisible after the LSB bit-pack).
+    # Compute the small-cap fractal once; nearest-neighbor upscale per
+    # strip for images larger than the cap.
     cap = _m._FRACTAL_CAP
     if max(width, height) > cap:
         if width >= height:
@@ -3221,8 +3172,8 @@ def _mandelbrot_pixel_iter(envelope: bytes, width: int, height: int,
     else:
         small_w, small_h = width, height
 
-    # Use the same seed math as the in-memory path so streaming and
-    # non-streaming outputs of the same source land on the same fractal.
+    # Match the in-memory path's seed math so streaming and non-streaming
+    # outputs of the same source produce the same fractal.
     seed_bytes = (_MANDELBROT_SALT
                   + struct.pack(">II", width, height)
                   + content_seed)
@@ -3764,38 +3715,21 @@ _inner_main()
 '''
 
 
-# Encrypted (password-protected) loader stub. Stays VISIBLE in the
-# generated .py — it has to, because it does the password prompt and
-# runtime decryption. The bulk of the actual rebuild logic (animation,
-# data decrypt, file write) lives in `_PY_INNER_RUNTIME` above and is
-# AES-CTR-encrypted before being embedded — opening the resulting .py
-# in notepad shows only this stub plus base64 ciphertext blobs.
-#
-# Counter handling stays in the stub (has to gate before any decrypt
-# attempt — encrypted code can't run on a wrong password). The registry
-# path / magic-value computation is therefore visible. That's a known
-# trade-off: the casual regedit user is deterred (path is `_872676883`,
-# values are HMAC magics, manual edit-to-0 = lockout), but a determined
-# attacker reading the source can reverse the magic computation.
+# Encrypted-loader stub for password-protected .py output. Visible in the
+# generated file: password prompt, attempt counter, AES-CTR decryption of
+# the embedded `_PY_INNER_RUNTIME` ciphertext. Inner runtime stays opaque
+# until the right password unlocks it.
 _PY_RUNTIME_ENCRYPTED = r'''
 print("Loading...", flush=True)
 import base64, os, sys, time, threading, hashlib, subprocess, getpass
 
-# Same PBKDF2 parameters as Vitriol's Stone-v3 envelope crypto
-# (`app/format_handlers/_stone_crypto.py`). Sharing the salt means a
-# given password produces the same AES key in both places — that's
-# harmless because the IV is content-derived per-file (SIV-style), so
-# no two encryptions ever reuse a (key, IV) pair.
+# PBKDF2 parameters match Stone-v3 envelope crypto in _stone_crypto.py.
 _PBKDF2_SALT = b"transmute-stone-v3"
 _PBKDF2_ITER = 200000
 
-# Storage location for the per-file failed-attempt counter. NOT named
-# "Vitriol" or "PyAttempts" so a casual regedit / file-system snoop
-# can't find it by searching for the obvious term. Encoded as byte-list
-# literals so a `grep "Software\\_"` or `grep "872676883"` on the
-# generated .py finds nothing — the path is reconstructed at runtime
-# only. This is obfuscation, not encryption: anyone who reads + executes
-# the byte-list can recover the values, but casual grep is defeated.
+# Per-file failed-attempt counter location. Path/basename encoded as
+# byte-list literals so a grep over the generated .py for the obvious
+# strings finds nothing.
 _REGISTRY_KEY = bytes([83,111,102,116,119,97,114,101,92,95,56,55,
                         50,54,55,54,56,56,51]).decode("ascii")
 _POSIX_STORE_BASENAME = bytes([46,56,55,50,54,55,54,56,56,51]).decode("ascii")
@@ -3803,9 +3737,8 @@ _MAX_ATTEMPTS = 0x05
 
 
 def _ensure_cryptography():
-    """The encrypted .py needs the `cryptography` library at runtime.
-    Most Python installs already have it (transitive dep of pip-installable
-    packages); when missing, offer to install it on the spot."""
+    """Install the `cryptography` library if missing — required for AES-CTR
+    decrypt at runtime."""
     try:
         import cryptography  # noqa: F401
         return True
@@ -3825,51 +3758,27 @@ def _ensure_cryptography():
         return False
 
 
-# Cross-platform attempt-counter storage. Two layers of obfuscation
-# beyond just "store the number":
-#
-#   1. Storage location is NOT named after Vitriol. Windows uses
-#      HKCU\Software\_872676883 (a number that looks like a session id);
-#      POSIX uses ~/.872676883 (a hidden file). Blends in with the
-#      hundreds of similar-looking system-y entries.
-#
-#   2. The stored DWORD is NOT the raw counter (0..MAX). It's a magic
-#      value derived as HMAC(file_id, counter_byte)[:4]. So:
-#        - count 0 → some specific 32-bit number
-#        - count 1 → a different 32-bit number
-#        - ...
-#        - any value NOT in {magic[0], magic[1], ... magic[MAX]} →
-#          treated as max-attempts (locked out).
-#      Setting the value to 0 in regedit doesn't reset the counter — it
-#      locks the user out. Copy-pasting a magic from a different file's
-#      entry doesn't transfer because the HMAC key is per-file.
-#
-# A determined user who reads the .py source can compute the magics and
-# circumvent. That's an accepted higher-bar threat — the obfuscation
-# stops a 30-second regedit-and-edit-to-zero attack.
+# Cross-platform attempt-counter storage. Stored DWORD is a magic value
+# derived as HMAC(file_id, counter_byte)[:4]; values outside the magic
+# set are treated as locked-out. Per-file HMAC key prevents cross-file
+# reuse.
 
 
 def _file_id_to_hmac_key(file_id):
-    """Return a per-file HMAC key derived from the file_id string. Each
-    file's counter mapping is independent, so even if a snoop figures
-    out one file's magic for count=0 they can't reuse it on another."""
+    """Return a per-file HMAC key derived from the file_id string."""
     return file_id.encode("ascii", errors="replace")
 
 
 def _magic_for_count(file_id, count):
-    """Compute the 32-bit magic value stored in the registry / json
-    when the counter is `count`. Different per-file thanks to the HMAC
-    key, different per count thanks to the input byte."""
+    """Compute the 32-bit magic stored in the counter for `count`."""
     import hmac as _hmac
     h = _hmac.new(_file_id_to_hmac_key(file_id), bytes([count & 0xFF]), "sha256")
     return int.from_bytes(h.digest()[:4], "big")
 
 
 def _count_for_magic(file_id, magic):
-    """Inverse: given a stored DWORD, find which counter it represents.
-    Returns _MAX_ATTEMPTS if no count in 0..MAX matches (treats unknown
-    values as 'already locked out' so a manual regedit-to-0 doesn't
-    grant the user any extra attempts)."""
+    """Inverse of `_magic_for_count`. Returns _MAX_ATTEMPTS for any
+    unknown value."""
     for c in range(_MAX_ATTEMPTS + 1):
         if _magic_for_count(file_id, c) == magic:
             return c
@@ -4149,91 +4058,46 @@ def _py_embed_to_file(src_path: Path, src_ext: str, dst: Path,
                                   cancel=cancel, src_filename=src_filename)
 
 
-# =====================================================================
-# Stone .py v4 — opaque-bootstrap format
-# =====================================================================
+# Stone .py v4 — opaque-bootstrap format for encrypted .py outputs.
 #
-# Replaces the v3 base64-tuple-of-strings format used by encrypted .py
-# outputs. Two problems v3 had:
+# Layout (Python source):
+#   _v4 = "<single base64 blob>"      # parses as one string, fast
+#   ... # == VITRIOL STONE v4 ==
+#   <visible bootstrap ~120 lines>
 #
-#   1. Multi-second startup delay before the password prompt: Python's
-#      parser had to tokenize + concat thousands of base64 string literals
-#      in `_data = ("..." "..." ... × thousands)` BEFORE any user code
-#      could run. For a 30 MB payload that's ~5–10 s on a typical machine,
-#      longer with antivirus scanning the file as it's read.
+# Decoded blob:
+#   magic        b"VTSv4\0"  6 B
+#   file_id      8 B          counter HMAC key
+#   iv_outer    16 B          AES-CTR IV for outer runtime
+#   iv_payload  16 B          AES-CTR IV for payload
+#   visible_hash 32 B         SHA-256 of plaintext payload
+#   outer_hash   32 B         SHA-256 of plaintext outer source (password verify)
+#   outer_size    4 B uint32 LE
+#   payload_size  8 B uint64 LE
+#   outer_ct    <outer_size> B
+#   payload_ct  <payload_size> B   (filename header + raw bytes)
 #
-#   2. The .py was readable in any text editor — the entire runtime
-#      (password handling, HMAC counter math, registry path obfuscation,
-#      self-delete logic) was visible Python source.
+# Visible bootstrap: imports, counter, password prompt, outer-runtime
+# decrypt+hash-verify, exec. Everything else (payload decrypt, SHA-256
+# tamper check, tamper response, filename parse, file write, success
+# clear) is opaque inside outer_ct.
 #
-# v4 fixes both with a single change: the outer runtime is encrypted in
-# the same blob as the payload, and everything BUT a small bootstrap
-# becomes opaque ciphertext. The blob is stored as ONE base64 string in
-# the source — Python parses it as a single STRING token instead of a
-# tuple of thousands, dropping parse time from ~10 s to <100 ms regardless
-# of payload size.
-#
-# Format on disk (encoded as Python source):
-#
-#   _v4 = "<single base64 string>"
-#       │
-#       └─→ base64-decoded blob:
-#           magic         b"VTSv4\0"   6 B
-#           file_id       8 B           random per-file (counter HMAC key)
-#           iv_outer     16 B           AES-CTR IV for outer runtime
-#           iv_payload   16 B           AES-CTR IV for payload
-#           visible_hash 32 B           SHA-256 of original plaintext payload
-#           outer_hash   32 B           SHA-256 of plaintext outer-runtime
-#                                       source — used as the password
-#                                       verify token (decrypt outer_ct,
-#                                       hash it, compare to this).
-#           outer_size    4 B uint32 LE
-#           payload_size  8 B uint64 LE
-#           outer_ct     <outer_size> B encrypted outer-runtime source
-#           payload_ct   <payload_size> B encrypted payload (filename
-#                                          header + raw bytes)
-#
-#   ... # == VITRIOL STONE v4 ==          ← marker comment
-#
-#   <bootstrap Python — visible source ~120 lines>
-#
-# What's visible: bootstrap with imports, counter mechanism, password
-# prompt, decrypt outer + hash check, exec.
-#
-# What's NOT visible (opaque inside outer_ct): the actual payload-decrypt
-# logic, the post-decrypt SHA-256 tamper check, the tamper-response
-# (set attempts to MAX + self-delete), filename parsing, file write,
-# success-case attempts-counter clear.
-#
-# The .exe path (`_exe_embed_to_file`) keeps using the v3 format inside
-# the PyInstaller stub — `selfextract_stub.exe` already provides full
-# opacity (the bundle is binary, not Python source visible to a viewer)
-# so v4's format gain is moot there. v4 applies to .py outputs only.
+# .exe path uses v3 inside the PyInstaller stub — bundle opacity makes
+# v4 redundant there.
 
 _V4_MAGIC = b"VTSv4\0"
 _V4_HEADER_FMT = "<6s8s16s16s32s32sIQ"
-# struct fields: magic, file_id, iv_outer, iv_payload, visible_hash,
-#                outer_hash, outer_size (uint32 LE), payload_size (uint64 LE)
 _V4_HEADER_LEN = 6 + 8 + 16 + 16 + 32 + 32 + 4 + 8   # = 122
 _V4_SOURCE_MARKER = "# == VITRIOL STONE v4 =="
 _V4_VARIABLE_NAME = "_v4"
 
 
-# Outer runtime — gets AES-CTR-encrypted with the password-derived key
-# BEFORE being embedded in the generated .py's blob. End users opening
-# the .py in a text editor see only the bootstrap + a base64 blob of
-# this code, not the code itself. The bootstrap decrypts and execs this
-# on a successful password match.
+# Outer runtime — AES-CTR-encrypted before embedding. Bootstrap decrypts
+# and execs on password match.
 #
-# Globals available (provided by the bootstrap's exec call):
-#   _key                 (bytes, AES key)
-#   _iv_payload          (bytes, 16-byte AES-CTR IV for the payload)
-#   _visible_hash        (bytes, 32-byte SHA-256 of original payload)
-#   _payload_ct          (bytes, encrypted payload blob)
-#   _file_id             (str, hex; same value the bootstrap used for counter)
-#   _attempts_set        (callable, signature: (file_id, n))
-#   _self_delete         (callable, no-arg)
-#   _MAX                 (int, max attempts before lockout — 5)
+# Globals provided by bootstrap exec:
+#   _key, _iv_payload, _visible_hash, _payload_ct, _file_id,
+#   _attempts_set(file_id, n), _self_delete(), _MAX
 _PY_OUTER_RUNTIME_V4 = r'''
 import struct as _st
 import hashlib as _hl
@@ -5115,28 +4979,19 @@ def _py_is_stone(src: Path) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Host: EXE (self-extracting Windows executable) — payload appended to a
-# pre-compiled stub.exe + magic marker. The stub locates its own .exe via
-# `sys.executable`, finds the magic via .rfind on the file bytes, and execs
-# the appended Python source. The appended source is the SAME .py runtime
-# we'd otherwise generate (plain or encrypted variant); the only twist is
-# that for the encrypted variant, the inner-runtime self-hash check has to
-# include the stub.exe bytes + magic in its hash (since at runtime it
-# hashes the entire .exe except the `_runtime = (...)` block).
-# ---------------------------------------------------------------------------
+# Host: EXE (self-extracting Windows .exe). Layout: stub.exe + magic +
+# appended Python source (same runtime as the .py target — plain or
+# encrypted). Encrypted variant's self-hash check includes stub bytes +
+# magic in the prefix.
 
-# Magic marker that separates the stub binary from the appended Python
-# source inside a Stone .exe. MUST match the constant in
-# `tools/selfextract_stub.py`. Trailing NUL keeps it from matching when
-# the literal string appears in source code (the runtime payload reads
-# its own bytes, which includes the appended payload's source).
+# Magic marker between stub binary and appended Python source. MUST match
+# the constant in tools/selfextract_stub.py. Trailing NUL prevents the
+# literal from matching when it appears in source.
 _EXE_PAYLOAD_MAGIC = b"TMUTSTUB-PAYLOAD\x00"
 
 
 def _stub_exe_bytes() -> bytes:
-    """Read the pre-compiled selfextract_stub.exe binary from the
-    bundled resources directory. Cached on first call."""
+    """Read the bundled selfextract_stub.exe. Cached after first call."""
     global _STUB_EXE_BYTES_CACHE
     cached = globals().get("_STUB_EXE_BYTES_CACHE")
     if cached is not None:

@@ -19,9 +19,8 @@ _CINZEL_FAMILY: str | None = None
 
 
 def _ensure_cinzel_loaded() -> str | None:
-    """Register Cinzel-Regular.ttf with Qt's font database on first use.
-    Returns the family name to pass to QFont, or None if the file is missing.
-    Idempotent — safe to call repeatedly."""
+    """Register Cinzel-Regular.ttf with Qt and return the family name, or
+    None if the file is missing. Idempotent."""
     global _CINZEL_FAMILY
     if _CINZEL_FAMILY is not None:
         return _CINZEL_FAMILY
@@ -48,13 +47,10 @@ from ..utils import settings
 
 
 def _logo_label(size_px: int = 28, boost: bool = False) -> QLabel | None:
-    """Render resources/logo.svg into a small QLabel pixmap. Returns None
-    if the SVG is missing.
+    """Render resources/logo.svg into a QLabel pixmap.
 
-    `boost=True` paints the SVG twice — once at full opacity and again at
-    half opacity over the top — which thickens the perceived stroke weight
-    and makes the icon read brighter at small sizes. Used for the title-bar
-    icon so it has visual presence next to the Cinzel header."""
+    `boost=True` composites a second pass at 55% alpha on top — thickens
+    the stroke for small sizes."""
     svg_path = resources_dir() / "logo.svg"
     if not svg_path.exists():
         return None
@@ -67,8 +63,6 @@ def _logo_label(size_px: int = 28, boost: bool = False) -> QLabel | None:
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     renderer.render(painter, QRectF(0, 0, size_px, size_px))
     if boost:
-        # Composite a second pass at reduced alpha to thicken/brighten the
-        # lines without altering the source SVG.
         painter.setOpacity(0.55)
         renderer.render(painter, QRectF(0, 0, size_px, size_px))
     painter.end()
@@ -148,19 +142,13 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        # Margins clear the inscribed BorderFrame on the sides + top. The
-        # bottom margin is small because the QStatusBar lives below the
-        # central widget; the BorderFrame is parented to the QMainWindow
-        # itself so it wraps the status bar too — bottom border sits BELOW
-        # the "Ready." text, giving the bulk buttons a natural buffer.
+        # Margins clear the BorderFrame; small bottom margin because the
+        # status bar sits below the central widget.
         outer.setContentsMargins(28, 28, 28, 6)
         outer.setSpacing(10)
 
-        # Top bar: title + global toggles (Philosopher's Stone, Verify Round-Trip).
+        # Top bar: title + global toggles.
         topbar = QHBoxLayout()
-        # Title cluster (icon + label) gets its own tight sub-layout so the
-        # icon sits close to the text without affecting the topbar's wider
-        # spacing between the title cluster and the toggles on the right.
         title_box = QHBoxLayout()
         title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(8)
@@ -169,12 +157,8 @@ class MainWindow(QMainWindow):
             title_box.addWidget(title_icon)
         title = QLabel("Vitriol")
         title.setObjectName("AppTitle")
-        # Hover tooltip surfaces the version — lightweight "About"
-        # affordance without adding a menu bar.
         title.setToolTip(f"V.I.T.R.I.O.L-Visita Interiora Terrae Rectificando Invenies Occultum Lapidemn")
-        # Apply Cinzel (engraved-cap serif) to the title only — the rest of
-        # the UI keeps its sans-serif. Slight letter-spacing for the classical
-        # carved-capital feel.
+        # Cinzel for the title only.
         cinzel_family = _ensure_cinzel_loaded()
         if cinzel_family:
             f = QFont(cinzel_family, 22)
@@ -232,9 +216,7 @@ class MainWindow(QMainWindow):
 
         self.playlist = Playlist()
         self.playlist.items_changed.connect(self._on_playlist_changed)
-        # Sync initial Stone-mode visual cue (red watermark) with the
-        # toggle's persisted state — the toggle was already configured
-        # above; we just need to inform the freshly-created playlist.
+        # Sync the playlist's red-watermark cue with the persisted toggle.
         self.playlist.set_stone_active(self.chk_stone.isChecked())
         outer.addWidget(self.playlist, 1)
 
@@ -361,27 +343,14 @@ class MainWindow(QMainWindow):
             w.update_bytes_progress(processed, total)
 
     def _status(self, msg: str, timeout: int = 0) -> None:
-        """Show a status-bar message with leading-space indent so the text
-        clears the inscribed left border. Qt's QStatusBar paints showMessage
-        text in its own paintEvent and ignores QSS padding-left, so prefix
-        is the reliable way to push the text right."""
-        # 4 spaces ≈ 20 px at the default UI font — matches what padding-left
-        # would have done if QStatusBar honored it.
+        """Show a status-bar message. Prefixes 4 spaces because QStatusBar
+        ignores QSS padding-left."""
         self.statusBar().showMessage("    " + msg, timeout)
 
     # --- Auto-update integration ------------------------------------------
-    # Two pieces:
-    #   1. show_update_banner(info) — shown via signal from main.py's
-    #      launch-time UpdateCheckThread when a newer release exists.
-    #   2. _open_update_dialog / _run_install_flow — shared by the
-    #      banner click and the visible "Check for Update" link in the
-    #      bottom-left of the central widget, so the install flow
-    #      lives in exactly one place.
 
     def show_update_banner(self, info: dict) -> None:
-        """Slot — invoked when the launch-time update check finds a newer
-        release. Stashes the info, makes the right-side status bar pill
-        visible. Clicking the pill opens the UpdateAvailableDialog."""
+        """Show the update-available pill in the status bar."""
         if not info:
             return
         self._pending_update_info = info
@@ -394,9 +363,8 @@ class MainWindow(QMainWindow):
         self._update_btn.show()
 
     def _open_update_dialog(self) -> None:
-        """Banner click handler — opens the UpdateAvailableDialog with the
-        last fetched info. Falls back to a manual check if no info has
-        been stashed (shouldn't happen in normal flow, but defensive)."""
+        """Open the UpdateAvailableDialog with the last fetched info, or
+        fall back to a manual check if nothing was stashed."""
         info = self._pending_update_info
         if info is None:
             self._check_updates_manual()
@@ -404,15 +372,8 @@ class MainWindow(QMainWindow):
         self._show_update_dialog(info)
 
     def _check_updates_manual(self) -> None:
-        """Manual 'Check for updates…' action — runs the API call on a
-        worker thread (so the UI doesn't freeze on a slow connection)
-        and shows one of three outcomes:
-          - newer version: open UpdateAvailableDialog
-          - up to date: brief "You're running the latest version." toast
-          - error: error dialog with the underlying message
-        """
-        # Local imports keep updater + QThread out of MainWindow's
-        # import-time dependency tree; the Help-menu path is rarely hit.
+        """Run the update API call on a worker thread and show one of:
+        UpdateAvailableDialog, "up to date" toast, or error dialog."""
         from PySide6.QtCore import QThread
         from ..core import updater
 
@@ -480,16 +441,13 @@ class MainWindow(QMainWindow):
             self._run_install_flow(info)
             return
 
-        # UPDATE_LATER or dialog dismissed — leave the banner showing so
-        # the user can come back to it later in this session, and let
-        # the 24h throttle govern the next launch reminder.
+        # UPDATE_LATER / dismissed — leave banner up; 24h throttle governs.
 
     def _run_install_flow(self, info: dict) -> None:
         """Download the installer with a progress dialog, then launch it.
 
-        On success this method does NOT return — `launch_installer_and_exit`
-        calls sys.exit(0) so the running Vitriol releases its file lock
-        before the installer touches Program Files.
+        Does not return on success: `launch_installer_and_exit` calls
+        sys.exit(0) so Inno can replace Vitriol.exe.
         """
         from PySide6.QtCore import QThread
         from PySide6.QtWidgets import QProgressDialog
@@ -529,10 +487,8 @@ class MainWindow(QMainWindow):
                 dialogs.error(self, "Update failed", str(error))
                 worker.deleteLater()
                 return
-            # Hand off to the installer. This call doesn't return — the
-            # app exits to release its file lock so Inno can replace
-            # Vitriol.exe cleanly. RestartApplications=yes in the .iss
-            # re-launches the new build after install finishes.
+            # Exits the app so Inno can replace Vitriol.exe; .iss has
+            # RestartApplications=yes for the post-install relaunch.
             try:
                 updater.launch_installer_and_exit(path)
             except Exception as e:
@@ -548,13 +504,11 @@ class MainWindow(QMainWindow):
         self.drop_zone.fade_watermark(0.13 if empty else 0.0)
 
     def _on_files_added(self, paths: list) -> None:
-        # Filter to known extensions; unknown ones are still added so the user sees the error inline.
+        # Unknown extensions still added so the user sees the error inline.
         self.playlist.add_paths([Path(p) for p in paths],
                                 masquerade=self.chk_stone.isChecked())
-        # Wire per-item signals exactly once. Marker on the widget itself
-        # avoids the disconnect/reconnect dance (which prints harmless but
-        # noisy RuntimeWarnings for newly-created widgets that have nothing
-        # to disconnect from).
+        # Wire per-item signals once. `_signals_wired` marker prevents
+        # re-connect warnings.
         for w in self.playlist.items():
             if getattr(w, "_signals_wired", False):
                 continue
@@ -566,15 +520,11 @@ class MainWindow(QMainWindow):
     # --- Per-item ----------------------------------------------------------
     def _start_convert(self, widget: PlaylistItemWidget,
                         skip_preflight: bool = False) -> None:
-        """Submit a single row's conversion to the queue.
+        """Submit a row's conversion to the queue.
 
-        `skip_preflight=True` is passed by the bulk handlers (Convert All /
-        Convert Selected) after they've already run their own batch
-        dialog and stamped the answer onto each eligible row. Direct
-        row-Convert clicks (via `convert_requested` signal) leave it at
-        the default False so the per-row animation prompt fires fresh
-        on every click — addresses the "asks once and never again" bug
-        where a re-Convert silently reused the previous answer.
+        `skip_preflight=True` is passed by the bulk handlers, which run
+        their own batch dialog. Direct row-Convert clicks leave it False
+        so the animation prompt re-asks each click.
         """
         if widget.is_running():
             return
@@ -584,9 +534,9 @@ class MainWindow(QMainWindow):
             return
         masq = bool(self.chk_stone.isChecked())
         verify = bool(self.chk_verify.isChecked() and self.chk_verify.isEnabled())
-        # Verify Round-Trip warning — only fires when estimated wall-clock
-        # exceeds the LONG_CONVERSION_SECONDS threshold (10 min). Per-item
-        # _verify_warned flag prevents re-prompting on retries.
+        # Verify Round-Trip warning fires when the estimate exceeds
+        # LONG_CONVERSION_SECONDS (10 min). _verify_warned suppresses
+        # repeats on retry.
         if verify and not getattr(widget, "_verify_warned", False):
             from ..core.estimator import estimate_verify_seconds, LONG_CONVERSION_SECONDS
             try:
@@ -604,12 +554,8 @@ class MainWindow(QMainWindow):
                 ):
                     return
             widget._verify_warned = True
-        # Single-row animation pre-flight. Skipped when called from a bulk
-        # handler (which ran its own batch dialog already). For direct
-        # row-Convert clicks, clear the sticky `_animation_choice_made`
-        # flag first so each click re-asks — otherwise the answer to
-        # the first Convert would silently apply to every subsequent
-        # Convert on the same row.
+        # Single-row animation pre-flight. Skipped from bulk handlers.
+        # Reset `_animation_choice_made` so each click re-asks.
         if not skip_preflight:
             widget._animation_choice_made = False
             if self._row_needs_animation_prompt(widget):
@@ -643,12 +589,9 @@ class MainWindow(QMainWindow):
         settings.set("masquerade_enabled", bool(checked))
         self._update_verify_enabled()
         self._refresh_stone_visuals()
-        # Refresh every playlist row's target dropdown — Stone adds/removes
-        # cross-category byte-passthrough hosts.
+        # Stone changes which target extensions appear in each row.
         for w in self.playlist.items():
             w.refresh_targets(masquerade=checked)
-        # Light up (or hide) the alchemical-circle watermark behind the
-        # playlist; only glows when Stone is engaged.
         self.playlist.set_stone_active(checked)
         self._status(
             "Philosopher's Stone " + ("ON — lossless byte-passthrough hosts available."
@@ -656,28 +599,19 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_stone_visuals(self) -> None:
-        """Sync the active QSS state of the Stone toggle. When `stoneActive`
-        is true, the toggle text renders in the same muted alchemical red
-        as the playlist's transmutation-circle watermark — visual cue that
-        Stone mode is engaged."""
+        """Sync the Stone toggle's active QSS state."""
         active = self.chk_stone.isChecked()
         self.chk_stone.setProperty("stoneActive", "true" if active else "false")
-        # Apply the active-state QSS directly. We can't rely on a global
-        # stylesheet because the app doesn't load one; setStyleSheet on the
-        # widget is enough since the dynamic [stoneActive="true"] selector
-        # only matters for THIS specific QCheckBox.
         if active:
             self.chk_stone.setStyleSheet(
                 "QCheckBox#StoneToggle {"
-                " color: #c0392b;"               # muted alchemical red — matches the watermark tint
+                " color: #c0392b;"
                 " font-weight: bold;"
                 "}"
             )
         else:
-            # Empty stylesheet → revert to default checkbox appearance.
             self.chk_stone.setStyleSheet("")
-        # Re-polish so the dynamic property selector (and any inherited QSS)
-        # kicks in.
+        # Re-polish so dynamic property selectors take effect.
         self.chk_stone.style().unpolish(self.chk_stone)
         self.chk_stone.style().polish(self.chk_stone)
 
@@ -705,10 +639,8 @@ class MainWindow(QMainWindow):
 
     # --- Bulk --------------------------------------------------------------
     def _bulk_verify_preflight(self, items: list[PlaylistItemWidget]) -> bool:
-        """Aggregate the Verify Round-Trip estimate across all queued items
-        and prompt once. Returns True if conversion should proceed (verify
-        either off, total under threshold, or user confirmed). Marks each
-        widget so the per-item warning won't fire again for this batch."""
+        """Sum the verify estimate for the batch and prompt once if it
+        exceeds the long-run threshold. Returns True to proceed."""
         verify = bool(self.chk_verify.isChecked() and self.chk_verify.isEnabled())
         if not verify:
             return True
@@ -736,18 +668,15 @@ class MainWindow(QMainWindow):
                 "(round-trip doubles each conversion). Continue with verification?",
             ):
                 return False
-        # Stamp _verify_warned on every eligible widget so per-row prompts
-        # don't fire again inside _start_convert.
+        # Mark eligible widgets so per-row prompts don't re-fire.
         for w in eligible:
             w._verify_warned = True
         return True
 
     def _row_needs_animation_prompt(self, widget: PlaylistItemWidget) -> bool:
-        """True if this row is a 3D conversion where the source has
-        animation tracks AND the target format can carry them — meaning
-        the user should be asked whether to attempt preservation. Skipped
-        once a choice has been recorded for this widget (idempotent across
-        retries within a session)."""
+        """True if this row is a 3D conversion with animation tracks and
+        a target format that can carry them, and no choice has been made
+        yet."""
         if getattr(widget, "_animation_choice_made", False):
             return False
         from ..format_handlers.model_handler import (
@@ -762,26 +691,18 @@ class MainWindow(QMainWindow):
         try:
             return has_animations(widget.path)
         except Exception:
-            # If detection fails (DLL missing, file unreadable, etc.),
-            # fall through to default static-only behavior — no prompt.
             return False
 
     def _bulk_animation_preflight(self, items: list[PlaylistItemWidget]) -> bool:
-        """Pre-flight scan for 3D rows that should get the animation-
-        preservation prompt. Shows ONE dialog per batch (with apply-to-all
-        semantics) if any rows are eligible. Stamps _animation_choice_made
-        on each eligible row so the per-row prompt in _start_convert
-        doesn't fire again. Returns True so the conversion can proceed
-        either way (the dialog can't fail — Yes or No are both valid)."""
+        """Show one batch-level animation-preservation dialog (apply-to-all)
+        if any row is eligible, and stamp the answer onto each eligible
+        widget. Always returns True (Yes/No both valid)."""
         eligible = [w for w in items
                      if not w.is_running() and w.status() != Status.DONE
                      and self._row_needs_animation_prompt(w)]
         if not eligible:
             return True
-        # Customize the warning text based on whether ANY eligible row
-        # targets FBX from a non-FBX source — that's the format pair
-        # with the known bind-pose-missing bug. Other format pairs
-        # (FBX/GLB → DAE, FBX → GLB) preserve animations correctly.
+        # Lossy bind-pose case: non-FBX source → FBX target.
         any_lossy_fbx_target = any(
             w.target_ext().lower() == ".fbx" and w.src_ext.lower() != ".fbx"
             for w in eligible
@@ -823,17 +744,8 @@ class MainWindow(QMainWindow):
 
     def _animation_prompt_message(self, filename: str,
                                     src_ext: str, target_ext: str) -> str:
-        """Build the text for the per-row animation-preservation prompt.
-
-        Customized by source/target ext pair so the user gets honest
-        information about which conversions preserve animations cleanly
-        and which are known to lose bind pose. The lossy case is
-        specifically: source is GLB or DAE (or any non-FBX 3D format)
-        and target is FBX. Assimp's FBX exporter doesn't write the
-        BindPose / PoseNode chunks for that input, so the resulting FBX
-        plays animations correctly but with the mesh stuck in T-pose
-        while the skeleton hops separately.
-        """
+        """Build the animation-preservation prompt text. Different copy
+        for the lossy non-FBX → FBX case (bind-pose loss) vs. clean paths."""
         head = (f"{filename} contains animation/rig data, and "
                 f"{target_ext} can carry it.\n\n")
 
@@ -855,7 +767,7 @@ class MainWindow(QMainWindow):
                 "geometry."
             )
 
-        # FBX → anything, GLB → DAE, FBX → GLB, etc. — clean paths.
+        # Clean paths: FBX → anything, GLB → DAE, FBX → GLB, etc.
         return head + (
             "Try to preserve animations during conversion?\n\n"
             "Yes — animation preserved. The " + src_ext + " → " + target_ext + "\n"
@@ -871,9 +783,7 @@ class MainWindow(QMainWindow):
             return
         if not dialogs.confirm(self, "Convert all?", f"Convert all {len(items)} item(s) in the playlist?"):
             return
-        # Clear sticky animation choices so this Convert click runs the
-        # bulk preflight fresh — each batch should re-ask if any rows are
-        # eligible, even if the user already answered in a previous run.
+        # Reset sticky animation choices so each batch re-asks.
         for w in items:
             w._animation_choice_made = False
         if not self._bulk_verify_preflight(items):
@@ -882,8 +792,6 @@ class MainWindow(QMainWindow):
             return
         for w in items:
             if not w.is_running() and w.status() != Status.DONE:
-                # skip_preflight: the bulk dialog above already covered
-                # animation preservation for every eligible row in this batch.
                 self._start_convert(w, skip_preflight=True)
 
     def _on_convert_selected(self) -> None:
@@ -893,7 +801,6 @@ class MainWindow(QMainWindow):
             return
         if not dialogs.confirm(self, "Convert selected?", f"Convert {len(items)} selected item(s)?"):
             return
-        # Clear sticky animation choices — see the comment in _on_convert_all.
         for w in items:
             w._animation_choice_made = False
         if not self._bulk_verify_preflight(items):
@@ -941,11 +848,8 @@ class MainWindow(QMainWindow):
         w = self._job_to_widget.get(job_id)
         if not w:
             return
-        # The background ticker thread may emit elapsed events that arrive
-        # in the Qt event loop AFTER the row widget was already deleted
-        # (cancel + remove race). The Python ref still exists but the C++
-        # side is gone, so attribute access raises shiboken RuntimeError.
-        # Swallow it cleanly — a stale tick is harmless.
+        # Stale tick after row widget deletion (cancel+remove race) raises
+        # shiboken RuntimeError. Harmless — drop the job mapping.
         try:
             w.set_elapsed(secs)
         except RuntimeError:

@@ -1,23 +1,13 @@
-"""3D model conversion via Assimp.
+"""3D model conversion via Assimp's C API (ctypes bindings).
 
-Recoded ctypes bindings — no pyassimp, no trimesh. We use Assimp's C API:
-  aiImportFile          — read a model into an aiScene*
-  aiGetExportFormatCount + aiGetExportFormatDescription — list writers
-  aiExportScene         — write a scene to a target format
-  aiReleaseImport       — free the imported scene
+Read/write: glb, gltf, obj, stl, fbx, ply, dae, 3ds.
 
-Scope:
-  - Read/write: glb, gltf, obj, stl, fbx, ply, dae, 3ds.
-  - Geometry always preserved. Animations preserved on a per-conversion
-    basis when the user opts in via the pre-flight dialog AND the target
-    format can carry them (.fbx / .dae / .glb / .gltf). On opt-out (or
-    formats that physically can't carry animations like .obj / .stl /
-    .ply / .3ds), animations are stripped before export so the output
-    is deterministically static-only.
-  - Errors from Assimp surface as-is (red status circle + tooltip).
+Animations: preserved when the user opts in via the pre-flight dialog AND
+the target format supports them (.fbx, .dae, .glb, .gltf). Otherwise
+stripped before export.
 
-Locating the DLL: app.utils.paths.bin_dir() first; then ASSIMP_DLL env var;
-then the standard Windows search path.
+DLL lookup: app.utils.paths.bin_dir() → ASSIMP_DLL env var → Windows
+search path.
 """
 from __future__ import annotations
 import ctypes
@@ -36,33 +26,23 @@ _log = get_logger()
 MEDIA_CATEGORY = "model"
 SUPPORTED = {".glb", ".gltf", ".obj", ".stl", ".fbx", ".ply", ".dae", ".3ds"}
 
-# Target formats whose specs CAN carry rigs/animations. Other targets
-# (.obj, .stl, .ply, .3ds) are geometry-only by spec — no point asking
-# the user about animation preservation since the file format can't
-# carry the data either way.
+# Target formats that can carry rigs/animations.
 ANIMATION_CAPABLE_TARGETS = {".fbx", ".dae", ".glb", ".gltf"}
 
-# Assimp post-processing flag bits we want.
+# Assimp post-processing flag bits.
 _aiProcess_Triangulate = 0x8
 _aiProcess_GenNormals = 0x20
 _aiProcess_JoinIdenticalVertices = 0x2
-# `aiProcess_PopulateArmatureData` (0x4000) populates `aiNode.mArmature`
-# pointers on import. Some Assimp exporters use these to emit proper
-# bind-pose data; the FBX exporter unfortunately does NOT (see comment
-# in `convert()` about the GLB → FBX skinning limitation). We pass it
-# anyway because it's harmless and helps the future-version case
-# where the FBX exporter starts honoring it, plus other targets like
-# .dae use the armature data correctly today.
 _aiProcess_PopulateArmatureData = 0x4000
 
-# Map output ext -> Assimp format-id strings (from aiGetExportFormatDescription)
+# Output ext → Assimp exporter format-id (from aiGetExportFormatDescription).
 _FORMAT_IDS = {
     ".glb": "glb2",
     ".gltf": "gltf2",
     ".obj": "obj",
-    ".stl": "stlb",   # binary STL by default
+    ".stl": "stlb",
     ".fbx": "fbx",
-    ".ply": "plyb",   # binary PLY
+    ".ply": "plyb",
     ".dae": "collada",
     ".3ds": "3ds",
 }
@@ -72,14 +52,9 @@ class _aiString(Structure):
     _fields_ = [("length", c_uint), ("data", ctypes.c_char * 1024)]
 
 
-# Partial mirror of Assimp's aiScene struct — only the leading fields up
-# through mAnimations. ctypes computes natural alignment, which matches
-# Assimp's C layout on x86_64 Windows. We use this to:
-#   - Read mNumAnimations (cheap detection of "does this file have rigs?")
-#   - Zero mNumAnimations to tell the exporter to skip animation tracks
-#     (used for the "drop animations" path).
-# We do NOT touch fields past mAnimations — Assimp expects the struct to
-# remain valid for aiReleaseImport, and we never reallocate it.
+# Partial mirror of Assimp's aiScene struct — leading fields through
+# mAnimations. Used to read mNumAnimations and to zero it (strip path).
+# Fields past mAnimations are not touched.
 class _aiScene(Structure):
     _fields_ = [
         ("mFlags", c_uint),
@@ -94,18 +69,13 @@ class _aiScene(Structure):
 
 
 def can_carry_animations(dst_ext: str) -> bool:
-    """True if the target file format spec supports embedded rigs/animations."""
+    """True if the target format supports embedded rigs/animations."""
     return dst_ext.lower() in ANIMATION_CAPABLE_TARGETS
 
 
 def has_animations(path: Path) -> bool:
-    """Cheap detection: does this 3D file contain any animation tracks?
-
-    Opens the file via Assimp with no post-processing (fastest path),
-    reads aiScene.mNumAnimations, and releases. Returns False if the
-    file isn't a 3D model, Assimp isn't loaded, or the import failed.
-    Cost: usually 50-500 ms depending on file size.
-    """
+    """Return True if the file has any animation tracks. Returns False
+    on non-models, missing Assimp, or import error."""
     if path.suffix.lower() not in SUPPORTED:
         return False
     try:
@@ -123,12 +93,8 @@ def has_animations(path: Path) -> bool:
 
 
 def _strip_animations(scene_ptr) -> None:
-    """Set aiScene.mNumAnimations = 0 so the exporter skips animation
-    tracks. The animation array itself stays allocated (Assimp owns it
-    and frees on aiReleaseImport); we just tell the exporter there are
-    zero entries. Bone references inside individual meshes are left
-    untouched — exporters that respect mNumAnimations=0 typically also
-    drop or static-pose the bone references on their own."""
+    """Set aiScene.mNumAnimations = 0 so the exporter emits no animation
+    tracks. Assimp still owns + frees the animation array."""
     scene = ctypes.cast(scene_ptr, POINTER(_aiScene)).contents
     scene.mNumAnimations = 0
 
@@ -137,8 +103,7 @@ _dll: Optional[ctypes.CDLL] = None
 
 
 def _find_dll_path() -> Optional[Path]:
-    """Delegates to paths.find_assimp() so launcher and runtime use the
-    same lookup logic."""
+    """Delegate to paths.find_assimp()."""
     from ..utils.paths import find_assimp
     return find_assimp()
 
@@ -187,18 +152,12 @@ def convert(
 ) -> None:
     """Convert a 3D model via Assimp.
 
-    `preserve_animations` (default False): when True, the loaded scene's
-    animation data is left intact, so Assimp's exporter has the
-    opportunity to embed it in the output (best-effort — actual
-    preservation depends on the format pair). When False, animations
-    are explicitly stripped before export so the output is
-    deterministically static-only.
+    `preserve_animations`: when True and the target format supports it,
+    animation data is left intact for the exporter. Otherwise stripped
+    before export.
 
-    The caller (router → main_window pre-flight) decides which mode to
-    pass based on a one-time user prompt when the source has animations
-    AND the target format can carry them. Targets that physically can't
-    carry animations (.obj, .stl, .ply, .3ds) ignore this flag — strip
-    happens regardless because the format can't represent the data.
+    Known limitation: GLB/DAE → FBX loses BindPose/PoseNode chunks (mesh
+    stays in T-pose, skeleton animates separately). FBX → GLB/DAE works.
     """
     dll = _load()
     fmt_id = _FORMAT_IDS.get(dst_ext)
@@ -206,21 +165,6 @@ def convert(
         raise RuntimeError(f"No Assimp exporter for {dst_ext}.")
 
     progress(0.05)
-    # Standard geometry-cleanup flags. PopulateArmatureData is included
-    # for skinned-mesh round-trip support — it's mandatory for some
-    # exporters (.dae) and harmless for others. Notably it does NOT
-    # fully fix GLB → FBX skinning round-trips: Assimp's FBX exporter
-    # has a long-standing limitation where it doesn't emit `BindPose`
-    # or `PoseNode` chunks when the source came from glTF. The exported
-    # FBX is structurally valid and includes Skin / Cluster nodes for
-    # bone-to-vertex bindings, but tools that load it find no rest-pose
-    # data and end up with the mesh stuck in T-pose while the skeleton
-    # animates separately — the "hopping in T-pose" symptom. There is
-    # no Assimp flag that fixes this; a real fix would require either
-    # patching Assimp's FBX exporter or post-processing the output FBX
-    # to inject BindPose nodes, both out of scope for this round.
-    # FBX → GLB direction works correctly; only the reverse direction
-    # is affected.
     flags = (_aiProcess_Triangulate
              | _aiProcess_GenNormals
              | _aiProcess_JoinIdenticalVertices
@@ -233,10 +177,7 @@ def convert(
     cancel.check()
     progress(0.55)
     try:
-        # Strip animations unless: user opted in AND the target format can
-        # actually carry them. Belt-and-suspenders gating — even if the
-        # caller forgets to consider can_carry_animations, we'll still do
-        # the right thing for geometry-only target formats.
+        # Strip animations unless caller opted in AND target supports them.
         if not (preserve_animations and can_carry_animations(dst_ext)):
             _strip_animations(scene)
 
