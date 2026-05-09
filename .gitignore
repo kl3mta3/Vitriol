@@ -19,7 +19,7 @@ resources/*.ttf
 resources/fonts/*.ttf
 resources/fonts/*.otf
 logs/
-
+docs/
 
 .pytest_cache/
 .mypy_cache/
