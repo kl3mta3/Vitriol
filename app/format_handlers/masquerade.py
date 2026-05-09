@@ -67,7 +67,8 @@ class TamperDetectedError(Exception):
 TARGETS = {".wav", ".png", ".bmp", ".txt", ".mkv", ".py", ".exe",
            ".ply", ".obj", ".glb",
            ".aiff", ".flac", ".m4a",
-           ".zip"}
+           ".zip", ".7z",
+           ".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"}
 # .mp4 was prototyped this round but deferred — see the MP4 functions
 # below. Lossless H.264 RGB produces unacceptably large files (~370 MB
 # for a 5 KB source) because libx264rgb's intra-only output doesn't
@@ -151,6 +152,14 @@ def has_envelope(path: "Path", ext: str) -> bool:
                         and names[0].startswith(_ZIP_MEMBER_PREFIX + "."))
         except Exception:
             return False
+    # .7z and the tar.* family follow the same single-member-named-original.*
+    # rule. has_envelope only fires when Stone is on AND the file's actual
+    # ext is a Stone target, so the cost of opening the archive once here
+    # is acceptable.
+    if ext == ".7z":
+        return _7z_is_stone(Path(path))
+    if ext in (".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"):
+        return _tar_is_stone(Path(path), ext)
     try:
         with open(path, "rb") as f:
             head = f.read(64 * 1024)
@@ -5348,6 +5357,198 @@ def _zip_extract(host: bytes) -> Tuple[bytes, str]:
 
 
 # ---------------------------------------------------------------------------
+# Host: 7z (single-member archive — same single-member trick as ZIP)
+# ---------------------------------------------------------------------------
+# Identical concept to the zip host: a real, valid .7z archive whose only
+# member is `original.{ext}`. Always plaintext (no 7z password), so opening
+# the file with 7-Zip / WinRAR / Keka extracts the original byte-for-byte.
+# Decoder same single-member rule.
+
+def _7z_embed(src_bytes: bytes, src_ext: str) -> bytes:
+    import io
+    import py7zr
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext if src_ext else ""
+    member_name = _ZIP_MEMBER_PREFIX + src_ext
+    buf = io.BytesIO()
+    with py7zr.SevenZipFile(buf, mode="w") as z:
+        z.writestr(src_bytes, member_name)
+    return buf.getvalue()
+
+
+def _7z_extract(host: bytes) -> Tuple[bytes, str]:
+    import io
+    import tempfile
+    import py7zr
+    try:
+        z = py7zr.SevenZipFile(io.BytesIO(host), mode="r")
+    except py7zr.exceptions.Bad7zFile as e:
+        raise ValueError(f"7z host: not a valid 7z ({e}).")
+    try:
+        names = z.getnames()
+        if len(names) != 1:
+            raise ValueError(
+                f"7z host: expected one member, got {len(names)}; "
+                "treating as opaque bytes.")
+        name = names[0]
+        if not name.startswith(_ZIP_MEMBER_PREFIX + "."):
+            raise ValueError(
+                f"7z host: member name {name!r} doesn't match "
+                "Stone-built `original.*` pattern.")
+        # py7zr 1.x doesn't expose an in-memory read-by-name. extract to a
+        # temp dir and slurp the one member back. The Stone payload is a
+        # single file so disk traffic is bounded by payload size.
+        with tempfile.TemporaryDirectory(prefix="vitriol-7z-stone-") as tmp:
+            z.extractall(path=tmp)
+            body = (Path(tmp) / name).read_bytes()
+        ext = name[len(_ZIP_MEMBER_PREFIX):]
+        if not ext.startswith("."):
+            ext = "." + ext if ext else ".bin"
+        return body, ext
+    finally:
+        z.close()
+
+
+def _7z_is_stone(path: Path) -> bool:
+    """Cheap probe: open the 7z and check the member name list. Used by
+    has_envelope() to decide whether Stone extraction should engage."""
+    import py7zr
+    try:
+        with py7zr.SevenZipFile(path, mode="r") as z:
+            names = z.getnames()
+            return (len(names) == 1
+                    and names[0].startswith(_ZIP_MEMBER_PREFIX + "."))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Host: TAR (and tar.gz, tar.bz2, tar.xz, tar.zst) — single-member archive
+# ---------------------------------------------------------------------------
+# Same single-member trick. tarfile auto-handles gz/bz2/xz; tar.zst goes
+# through the zstandard wrapper because Python doesn't have a built-in
+# tarfile mode for it.
+#
+# All five compound extensions share the same embed/extract code path with
+# a small dispatch on the compression scheme.
+
+# Map ext -> (tarfile mode for write, mode for read).
+_TAR_MODES = {
+    ".tar":     ("w",     "r:"),
+    ".tar.gz":  ("w:gz",  "r:gz"),
+    ".tar.bz2": ("w:bz2", "r:bz2"),
+    ".tar.xz":  ("w:xz",  "r:xz"),
+    # tar.zst handled separately via zstandard streamer
+}
+
+
+def _tar_embed(src_bytes: bytes, src_ext: str, dst_ext: str) -> bytes:
+    import io
+    import tarfile
+    if not src_ext.startswith("."):
+        src_ext = "." + src_ext if src_ext else ""
+    member_name = _ZIP_MEMBER_PREFIX + src_ext
+
+    if dst_ext == ".tar.zst":
+        import zstandard as zstd
+        outer = io.BytesIO()
+        cctx = zstd.ZstdCompressor(level=10)
+        with cctx.stream_writer(outer, closefd=False) as writer:
+            with tarfile.open(fileobj=writer, mode="w|") as t:
+                info = tarfile.TarInfo(name=member_name)
+                info.size = len(src_bytes)
+                t.addfile(info, io.BytesIO(src_bytes))
+        return outer.getvalue()
+
+    write_mode = _TAR_MODES[dst_ext][0]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=write_mode) as t:
+        info = tarfile.TarInfo(name=member_name)
+        info.size = len(src_bytes)
+        t.addfile(info, io.BytesIO(src_bytes))
+    return buf.getvalue()
+
+
+def _tar_extract(host: bytes, src_ext: str) -> Tuple[bytes, str]:
+    import io
+    import tarfile
+    if src_ext == ".tar.zst":
+        # Decompress to a seekable BytesIO before opening the tar. We write
+        # the zstd stream without a content-size header (streaming compress),
+        # so `dctx.decompress(buf)` would refuse it; use stream_reader and
+        # drain it instead. Stone payloads are bounded in size so reading
+        # the whole thing into RAM is fine.
+        import zstandard as zstd
+        dctx = zstd.ZstdDecompressor()
+        try:
+            with dctx.stream_reader(io.BytesIO(host)) as reader:
+                decompressed = reader.read()
+        except zstd.ZstdError as e:
+            raise ValueError(f"tar.zst host: bad zstd stream ({e}).")
+        try:
+            t = tarfile.open(fileobj=io.BytesIO(decompressed), mode="r:")
+        except tarfile.TarError as e:
+            raise ValueError(f"tar.zst host: bad tar inside zstd ({e}).")
+    else:
+        read_mode = _TAR_MODES.get(src_ext, ("w", "r:*"))[1]
+        try:
+            t = tarfile.open(fileobj=io.BytesIO(host), mode=read_mode)
+        except tarfile.TarError as e:
+            raise ValueError(f"tar host: not a valid tar ({e}).")
+    try:
+        members = t.getmembers()
+        if len(members) != 1:
+            raise ValueError(
+                f"tar host: expected one member, got {len(members)}; "
+                "treating as opaque bytes.")
+        m = members[0]
+        if not m.name.startswith(_ZIP_MEMBER_PREFIX + "."):
+            raise ValueError(
+                f"tar host: member name {m.name!r} doesn't match "
+                "Stone-built `original.*` pattern.")
+        f = t.extractfile(m)
+        if f is None:
+            raise ValueError(f"tar host: member {m.name!r} not extractable.")
+        body = f.read()
+        ext = m.name[len(_ZIP_MEMBER_PREFIX):]
+        if not ext.startswith("."):
+            ext = "." + ext if ext else ".bin"
+        return body, ext
+    finally:
+        t.close()
+
+
+def _tar_is_stone(path: Path, ext: str) -> bool:
+    """Cheap-as-possible probe: open the tar, check the first member's name.
+    For compound exts (tar.gz/tar.bz2/tar.xz/tar.zst) tarfile/zstandard
+    handles the decompression streaming so we don't read the whole file."""
+    import tarfile
+    try:
+        if ext == ".tar.zst":
+            import io
+            import zstandard as zstd
+            dctx = zstd.ZstdDecompressor()
+            with open(path, "rb") as f, dctx.stream_reader(f) as reader:
+                with tarfile.open(fileobj=reader, mode="r|") as t:
+                    first = t.next()
+                    if first is None or not first.name.startswith(
+                            _ZIP_MEMBER_PREFIX + "."):
+                        return False
+                    second = t.next()
+                    return second is None
+        read_mode = _TAR_MODES.get(ext, ("w", "r:*"))[1]
+        with tarfile.open(path, mode=read_mode) as t:
+            first = t.next()
+            if first is None or not first.name.startswith(
+                    _ZIP_MEMBER_PREFIX + "."):
+                return False
+            second = t.next()
+            return second is None
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -5357,6 +5558,15 @@ _EMBED = {
     ".ply": _ply_embed, ".obj": _obj_embed, ".glb": _glb_embed,
     ".aiff": _aiff_embed,
     ".zip": _zip_embed,
+    ".7z": _7z_embed,
+    # tar.* embedders use the same _tar_embed but need dst_ext to choose the
+    # compression scheme. Wrapped via lambdas so they fit the (bytes, ext)->bytes
+    # signature the rest of the engine assumes for archive hosts.
+    ".tar":     lambda b, e: _tar_embed(b, e, ".tar"),
+    ".tar.gz":  lambda b, e: _tar_embed(b, e, ".tar.gz"),
+    ".tar.bz2": lambda b, e: _tar_embed(b, e, ".tar.bz2"),
+    ".tar.xz":  lambda b, e: _tar_embed(b, e, ".tar.xz"),
+    ".tar.zst": lambda b, e: _tar_embed(b, e, ".tar.zst"),
     # .flac is dispatched specially below (needs Path target for FFmpeg).
 }
 _EXTRACT = {
@@ -5367,6 +5577,14 @@ _EXTRACT = {
     ".flac": _flac_extract_from_bytes,
     ".m4a": _alac_extract_from_bytes,
     ".zip": _zip_extract,
+    ".7z": _7z_extract,
+    # tar extractors need src_ext to pick decompression — bound at lookup
+    # time via lambdas.
+    ".tar":     lambda b: _tar_extract(b, ".tar"),
+    ".tar.gz":  lambda b: _tar_extract(b, ".tar.gz"),
+    ".tar.bz2": lambda b: _tar_extract(b, ".tar.bz2"),
+    ".tar.xz":  lambda b: _tar_extract(b, ".tar.xz"),
+    ".tar.zst": lambda b: _tar_extract(b, ".tar.zst"),
 }
 
 
