@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QAction, QFont, QFontDatabase, QIcon
+from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton, QStatusBar,
+    QCheckBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStatusBar,
     QVBoxLayout, QWidget,
 )
 
@@ -172,14 +172,6 @@ class MainWindow(QMainWindow):
         # Hover tooltip surfaces the version — lightweight "About"
         # affordance without adding a menu bar.
         title.setToolTip(f"V.I.T.R.I.O.L-Visita Interiora Terrae Rectificando Invenies Occultum Lapidemn")
-        # Right-click on the wordmark exposes admin actions that don't
-        # warrant a full menu bar — currently just "Check for updates…".
-        # Discoverable enough through power-user habit; the automatic
-        # 24h check is what casual users will actually rely on.
-        title.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        title.customContextMenuRequested.connect(
-            lambda pos, t=title: self._show_title_context_menu(t.mapToGlobal(pos))
-        )
         # Apply Cinzel (engraved-cap serif) to the title only — the rest of
         # the UI keeps its sans-serif. Slight letter-spacing for the classical
         # carved-capital feel.
@@ -265,6 +257,44 @@ class MainWindow(QMainWindow):
         self.btn_remove_sel.clicked.connect(self._on_remove_selected)
         self.btn_clear.clicked.connect(self._on_clear)
 
+        # Discoverable manual-update entry-point. The wordmark right-click
+        # context menu still works (kept for power-user habit) but most
+        # users never discover hidden right-click gestures, so a visible
+        # link above the status bar gives the same affordance with zero
+        # discovery cost. Lives in the central widget rather than the
+        # QStatusBar so it stays visible when conversion-progress
+        # messages are showing in the status bar.
+        update_check_row = QHBoxLayout()
+        update_check_row.setContentsMargins(0, 0, 0, 0)
+        self._update_check_link = QPushButton("Check for Update")
+        self._update_check_link.setObjectName("UpdateCheckLink")
+        self._update_check_link.setFlat(True)
+        self._update_check_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_check_link.setStyleSheet(
+            "QPushButton#UpdateCheckLink {"
+            " color: #707080;"
+            " background: transparent;"
+            " border: none;"
+            " padding: 2px 6px;"
+            " font-size: 10px;"
+            " font-weight: 400;"
+            " text-align: left;"
+            "}"
+            "QPushButton#UpdateCheckLink:hover {"
+            " color: #a78bfa;"
+            " text-decoration: underline;"
+            "}"
+        )
+        self._update_check_link.setToolTip(
+            "Check GitHub for a newer version of Vitriol. "
+            "(Same as right-clicking the title bar — this link is the "
+            "discoverable version of that gesture.)"
+        )
+        self._update_check_link.clicked.connect(self._check_updates_manual)
+        update_check_row.addWidget(self._update_check_link)
+        update_check_row.addStretch(1)
+        outer.addLayout(update_check_row)
+
         self.setStatusBar(QStatusBar())
         # Make the status bar tall enough that the "Ready." text sits well
         # above the inscribed BorderFrame's bottom edge. Bottom padding is
@@ -340,13 +370,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("    " + msg, timeout)
 
     # --- Auto-update integration ------------------------------------------
-    # Three pieces:
+    # Two pieces:
     #   1. show_update_banner(info) — shown via signal from main.py's
     #      launch-time UpdateCheckThread when a newer release exists.
-    #   2. _show_title_context_menu — right-click on the wordmark exposes
-    #      a manual "Check for updates…" action.
-    #   3. _open_update_dialog / _run_install_flow — shared by both
-    #      the banner click and the manual check, so the install flow
+    #   2. _open_update_dialog / _run_install_flow — shared by the
+    #      banner click and the visible "Check for Update" link in the
+    #      bottom-left of the central widget, so the install flow
     #      lives in exactly one place.
 
     def show_update_banner(self, info: dict) -> None:
@@ -373,16 +402,6 @@ class MainWindow(QMainWindow):
             self._check_updates_manual()
             return
         self._show_update_dialog(info)
-
-    def _show_title_context_menu(self, global_pos) -> None:
-        """Right-click on the Vitriol wordmark. Currently exposes
-        'Check for updates…' as the only entry; future actions (About,
-        Preferences) plug in here without needing a full menu bar."""
-        menu = QMenu(self)
-        check_action = QAction("Check for updates…", self)
-        check_action.triggered.connect(self._check_updates_manual)
-        menu.addAction(check_action)
-        menu.exec(global_pos)
 
     def _check_updates_manual(self) -> None:
         """Manual 'Check for updates…' action — runs the API call on a

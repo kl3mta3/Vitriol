@@ -118,21 +118,28 @@ def check_for_update(silent: bool = True) -> Optional[dict[str, Any]]:
     settings.set("last_update_check", int(time.time()))
 
     tag = raw.get("tag_name") or ""
-    latest = tag.lstrip("vV").strip()
-    # Reject tags that don't look like a real semver. Protects against the
-    # case where a non-versioned release (e.g. `Vitriol_Portable_Edition`,
-    # a pre-release branch tag, etc.) gets accidentally clicked as "Set as
-    # the latest release" in the GitHub UI. Without this guard the update
-    # check would pull `tag_name = "Vitriol_Portable_Edition"`, parse it
-    # as version (0,) via _version_tuple's fallback, decide nothing's
-    # newer, and silently stop notifying users about real new releases.
-    if not re.match(r"^\d+\.\d+\.\d+", latest):
+    # Extract the version pattern from anywhere in the tag string.
+    # Accepts all common tagging conventions:
+    #   "v1.1.1"         -> "1.1.1"
+    #   "1.1.1"          -> "1.1.1"
+    #   "Vitriol_1.1.1"  -> "1.1.1"
+    #   "release-2.0.0"  -> "2.0.0"
+    # Rejects tags that contain no version-shaped substring at all
+    # (e.g. "Vitriol_Portable_Edition", "nightly", "main") — protects
+    # against the case where a non-versioned release gets accidentally
+    # clicked as "Set as the latest release" in the GitHub UI. Without
+    # this guard the updater would parse the non-version tag as (0,)
+    # via _version_tuple's fallback, decide nothing's newer, and
+    # silently stop notifying users about real new releases.
+    m = re.search(r"(\d+\.\d+\.\d+(?:\.\d+)?)", tag)
+    if not m:
         if not silent:
             raise RuntimeError(
-                f"Latest release tag '{tag}' isn't a version number — "
+                f"Latest release tag '{tag}' contains no version number — "
                 f"check the 'Set as latest release' flag on the GitHub release page."
             )
         return None
+    latest = m.group(1)
     if not latest:
         if not silent:
             raise RuntimeError("GitHub returned a release without a version tag.")
