@@ -25,8 +25,11 @@ from . import charset
 # This module exposes multiple DOC_KINDs. The registry currently keys handlers
 # by ext on a single DOC_KIND, so we split into per-ext "shim" attributes by
 # listing both reads/writes here and dispatching internally.
-SUPPORTED_READ = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html", ".py"}
-SUPPORTED_WRITE = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".html", ".py"}
+# Note: json/yaml/ini/toml/jsonl/env are reserved for `config_handler.py`
+# which does real semantic conversion among them. text_plain still owns the
+# *prose* family below and the catch-all xml passthrough.
+SUPPORTED_READ = {".txt", ".log", ".xml", ".html", ".py"}
+SUPPORTED_WRITE = {".txt", ".log", ".xml", ".html", ".py"}
 DOC_KIND = "text"
 
 # Streaming pass-through: plain-text → plain-text conversion above the
@@ -34,7 +37,7 @@ DOC_KIND = "text"
 # normalization. Rich-text round-trips via TextDoc (HTML, etc.) stay on the
 # whole-file path because the IR tree must be in memory.
 STREAMABLE = True
-_STREAM_PASSTHROUGH_EXTS = {".txt", ".log", ".ini", ".json", ".xml", ".yaml", ".py"}
+_STREAM_PASSTHROUGH_EXTS = {".txt", ".log", ".xml", ".py"}
 
 
 def can_stream(src_ext: str, dst_ext: str) -> bool:
