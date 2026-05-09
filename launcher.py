@@ -84,7 +84,25 @@ REQUIRED_PY = [
     ("numpy", "numpy>=1.24"),
     # AES-256-CTR for the encrypted Stone v3 envelope. Pure-stdlib has no
     # AES; the cryptography package is the standard choice (~5 MB).
+    # Also used by crypto_handler for PEM/CRT/KEY conversions.
     ("cryptography", "cryptography>=41.0"),
+    # --- Format-expansion deps -------------------------------------------
+    # Pillow plugins for avif / heic-heif / jxl decoding & encoding.
+    ("pillow_avif", "pillow-avif-plugin>=1.4"),
+    ("pillow_heif", "pillow-heif>=0.16"),
+    ("pillow_jxl", "pillow-jxl-plugin>=1.2"),
+    # Font conversions among otf/ttf/woff/woff2.
+    ("fontTools", "fonttools>=4.50"),
+    ("brotli", "brotli>=1.1"),
+    # Archive conversions (7z + tar.zst).
+    ("py7zr", "py7zr>=0.21"),
+    ("zstandard", "zstandard>=0.22"),
+    # Columnar data (parquet/feather/orc).
+    ("pyarrow", "pyarrow>=15.0"),
+    # TOML write (read uses stdlib tomllib on 3.11+).
+    ("tomli_w", "tomli-w>=1.0"),
+    # YAML for the config_handler (json↔yaml↔toml↔ini semantic conversion).
+    ("yaml", "PyYAML>=6.0"),
 ]
 
 
@@ -139,6 +157,13 @@ ASSIMP_SHA = ""
 DEJAVU_URL = "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip"
 DEJAVU_SHA = ""
 
+# Pandoc: universal document converter, MIT-licensed. Single ~200MB binary
+# that adds rst, org, ipynb, tex, fb2, opml, mediawiki, dokuwiki, jira,
+# textile, muse, typst, djot, docbook, jats, haddock, man, asciidoc, beamer,
+# revealjs, and ~30 other document formats in one shot.
+PANDOC_URL = "https://github.com/jgm/pandoc/releases/download/3.5/pandoc-3.5-windows-x86_64.zip"
+PANDOC_SHA = ""
+
 # Cinzel — OFL-licensed engraved-cap serif from Google Fonts. Used for the
 # "Vitriol" title only. The repo only ships the variable font now —
 # brackets must be URL-encoded.
@@ -154,6 +179,10 @@ def _find_ffmpeg() -> Optional[Path]:
 
 def _find_assimp() -> Optional[Path]:
     return _paths.find_assimp()
+
+
+def _find_pandoc() -> Optional[Path]:
+    return _paths.find_pandoc()
 
 
 def _find_dejavu() -> Optional[Path]:
@@ -225,6 +254,31 @@ def _install_ffmpeg(log) -> bool:
                     except OSError:
                         pass
         log("  FFmpeg installed")
+        return True
+    finally:
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _install_pandoc(log) -> bool:
+    log("Pandoc missing — fetching (enables ~50 document formats)")
+    zip_path = BIN / "pandoc-download.zip"
+    try:
+        if not _download(PANDOC_URL, zip_path, PANDOC_SHA, log):
+            return False
+        with zipfile.ZipFile(zip_path) as z:
+            for n in z.namelist():
+                base = n.rsplit("/", 1)[-1].lower()
+                if base in ("pandoc.exe", "pandoc"):
+                    with z.open(n) as src, open(BIN / base, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    try:
+                        os.chmod(BIN / base, 0o755)
+                    except OSError:
+                        pass
+        log("  Pandoc installed")
         return True
     finally:
         try:
@@ -442,6 +496,10 @@ def main() -> int:
         # 3. Assimp — auto-fetch
         if _find_assimp() is None:
             _install_assimp(ui.log)
+
+        # 3b. Pandoc — auto-fetch (universal document converter, ~200MB)
+        if _find_pandoc() is None:
+            _install_pandoc(ui.log)
 
         # 4. DejaVuSans.ttf — auto-fetch (PDF Unicode coverage)
         if _find_dejavu() is None:
