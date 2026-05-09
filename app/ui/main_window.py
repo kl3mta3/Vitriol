@@ -6,8 +6,8 @@ from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
-    QCheckBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QStatusBar,
-    QVBoxLayout, QWidget,
+    QCheckBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QStatusBar, QVBoxLayout, QWidget,
 )
 
 from ..utils.paths import resources_dir
@@ -225,10 +225,20 @@ class MainWindow(QMainWindow):
         self.btn_convert_all.setObjectName("Primary")
         self.btn_convert_sel = QPushButton("Convert Selected")
         self.btn_convert_sel.setObjectName("Secondary")
+        # Bundles all completed outputs of the selected (checked) rows into
+        # a single .zip the user picks. Avoids dragging a hundred individual
+        # files out of the output folder one by one.
+        self.btn_download_sel = QPushButton("Download Selected")
+        self.btn_download_sel.setObjectName("Secondary")
+        self.btn_download_sel.setToolTip(
+            "Bundle the completed conversions of the selected rows into "
+            "a single .zip file."
+        )
         self.btn_remove_sel = QPushButton("Remove Selected")
         self.btn_clear = QPushButton("Clear Playlist")
         bulk.addWidget(self.btn_convert_all)
         bulk.addWidget(self.btn_convert_sel)
+        bulk.addWidget(self.btn_download_sel)
         bulk.addStretch(1)
         bulk.addWidget(self.btn_remove_sel)
         bulk.addWidget(self.btn_clear)
@@ -236,6 +246,7 @@ class MainWindow(QMainWindow):
 
         self.btn_convert_all.clicked.connect(self._on_convert_all)
         self.btn_convert_sel.clicked.connect(self._on_convert_selected)
+        self.btn_download_sel.clicked.connect(self._on_download_selected)
         self.btn_remove_sel.clicked.connect(self._on_remove_selected)
         self.btn_clear.clicked.connect(self._on_clear)
 
@@ -810,6 +821,112 @@ class MainWindow(QMainWindow):
         for w in items:
             if not w.is_running():
                 self._start_convert(w, skip_preflight=True)
+
+    def _on_download_selected(self) -> None:
+        """Bundle every completed output of the checked rows into one .zip
+        the user picks via a save dialog. Skips rows that aren't DONE
+        (queued/running/errored) and rows whose output file is missing on
+        disk. Filename collisions inside the zip are disambiguated with a
+        numeric suffix so nothing gets silently overwritten."""
+        import zipfile
+        items = self.playlist.checked_items()
+        if not items:
+            dialogs.info(
+                self, "Nothing selected",
+                "Tick the checkboxes of items you want to download.",
+            )
+            return
+
+        done_items = [w for w in items if w.status() == Status.DONE]
+        if not done_items:
+            dialogs.info(
+                self, "Nothing to download",
+                f"None of the {len(items)} selected item(s) are finished. "
+                "Convert them first, then try again.",
+            )
+            return
+
+        # Gather (output_path, source-row-title-for-error-reporting) and
+        # filter out files that vanished between conversion and download.
+        pairs: list[tuple[Path, str]] = []
+        missing: list[str] = []
+        for w in done_items:
+            try:
+                out = w.output_path()
+            except Exception as e:
+                missing.append(f"{w.path.name} ({e})")
+                continue
+            if out.exists() and out.is_file():
+                pairs.append((out, w.path.name))
+            else:
+                missing.append(out.name)
+
+        if not pairs:
+            dialogs.info(
+                self, "No output files found",
+                "All of the selected completed conversions are missing their "
+                "output file on disk.",
+            )
+            return
+
+        # Default filename based on common ancestor / row count.
+        default_name = (
+            f"vitriol-{len(pairs)}-files.zip"
+            if len(pairs) > 1 else
+            f"{pairs[0][0].stem}.zip"
+        )
+        # Default save location: the parent dir of the first output, which is
+        # almost always the user's chosen output folder.
+        default_dir = pairs[0][0].parent
+        zip_path_str, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save bundled conversions",
+            str(default_dir / default_name),
+            "ZIP archive (*.zip);;All files (*)",
+        )
+        if not zip_path_str:
+            return  # user cancelled
+        zip_path = Path(zip_path_str)
+        if zip_path.suffix.lower() != ".zip":
+            zip_path = zip_path.with_suffix(zip_path.suffix + ".zip")
+
+        # Build the zip. DEFLATE level 6 is a good size/speed compromise;
+        # most converted media is already compressed so the entries STORE
+        # fast anyway.
+        used_names: dict[str, int] = {}
+        try:
+            with zipfile.ZipFile(zip_path, "w",
+                                 compression=zipfile.ZIP_DEFLATED,
+                                 compresslevel=6) as zf:
+                for out_path, _ in pairs:
+                    arcname = out_path.name
+                    # Disambiguate same-named files: foo.png, foo (2).png, ...
+                    if arcname in used_names:
+                        used_names[arcname] += 1
+                        n = used_names[arcname]
+                        stem = out_path.stem
+                        suffix = out_path.suffix
+                        arcname = f"{stem} ({n}){suffix}"
+                    else:
+                        used_names[arcname] = 1
+                    zf.write(out_path, arcname)
+        except OSError as e:
+            dialogs.info(
+                self, "Could not write zip",
+                f"Failed to write {zip_path.name}: {e}",
+            )
+            return
+
+        msg = f"Wrote {len(pairs)} file(s) to {zip_path.name}."
+        if missing:
+            shown = "\n  ".join(missing[:8])
+            extra = "" if len(missing) <= 8 else f"\n  ... and {len(missing) - 8} more"
+            msg += (
+                f"\n\nSkipped {len(missing)} item(s) whose output was "
+                f"missing on disk:\n  {shown}{extra}"
+            )
+        dialogs.info(self, "Download complete", msg)
+        self._status(f"Bundled {len(pairs)} file(s) -> {zip_path}", 8000)
 
     def _on_remove_selected(self) -> None:
         items = self.playlist.checked_items()
