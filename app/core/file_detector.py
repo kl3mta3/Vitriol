@@ -20,11 +20,20 @@ _ALIASES = {
     ".htm": ".html",
     ".yml": ".yaml",
     ".aif": ".aiff",
-    ".m4v": ".mp4",
-    ".mpeg": ".mpg",
     ".mts": ".ts",
-    ".heif": ".heic",
+    # Tar archive single-suffix aliases (.tgz, .tbz2, .txz, .tzst) collapse
+    # to the canonical compound forms used by archive_handler.
+    ".tgz": ".tar.gz",
+    ".tbz2": ".tar.bz2",
+    ".tbz": ".tar.bz2",
+    ".txz": ".tar.xz",
+    ".tzst": ".tar.zst",
 }
+
+# Compound suffixes that need to be matched on the full filename rather than
+# `path.suffix` (which only returns the last `.foo` segment). Order matters
+# only for prefix overlap, which we don't have here.
+_COMPOUND_SUFFIXES = (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")
 
 
 def normalize_ext(ext: str) -> str:
@@ -35,6 +44,10 @@ def normalize_ext(ext: str) -> str:
 
 
 def ext_for(path: Path) -> str:
+    name = path.name.lower()
+    for compound in _COMPOUND_SUFFIXES:
+        if name.endswith(compound):
+            return compound
     return normalize_ext(path.suffix)
 
 
