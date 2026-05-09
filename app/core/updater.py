@@ -60,10 +60,14 @@ GITHUB_RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 _CHECK_INTERVAL_S = 24 * 60 * 60
 
 
-# Asset name pattern: `VitriolSetup-1.2.0.exe`. We deliberately match
-# the bare basename (no path separators) so a future repo reorganization
-# that changes asset URL structure doesn't break the matcher.
-_INSTALLER_NAME_RE = re.compile(r"^VitriolSetup-(\d+\.\d+\.\d+)\.exe$", re.IGNORECASE)
+# Asset name pattern. Accepts both `VitriolSetup-1.2.0.exe` (versioned —
+# what older releases shipped) and `VitriolSetup.exe` (un-versioned — used
+# so that `releases/latest/download/VitriolSetup.exe` is a stable URL the
+# website can link without per-version updates). Either is valid; the
+# version comparison uses the release's tag_name field, not the filename.
+_INSTALLER_NAME_RE = re.compile(
+    r"^VitriolSetup(?:-\d+\.\d+\.\d+)?\.exe$", re.IGNORECASE
+)
 
 # SHA-256 in the release body — the RELEASE_NOTES_INSTALLER.md template
 # emits the hash as a lone 64-char hex string inside a fenced code block.
@@ -115,6 +119,20 @@ def check_for_update(silent: bool = True) -> Optional[dict[str, Any]]:
 
     tag = raw.get("tag_name") or ""
     latest = tag.lstrip("vV").strip()
+    # Reject tags that don't look like a real semver. Protects against the
+    # case where a non-versioned release (e.g. `Vitriol_Portable_Edition`,
+    # a pre-release branch tag, etc.) gets accidentally clicked as "Set as
+    # the latest release" in the GitHub UI. Without this guard the update
+    # check would pull `tag_name = "Vitriol_Portable_Edition"`, parse it
+    # as version (0,) via _version_tuple's fallback, decide nothing's
+    # newer, and silently stop notifying users about real new releases.
+    if not re.match(r"^\d+\.\d+\.\d+", latest):
+        if not silent:
+            raise RuntimeError(
+                f"Latest release tag '{tag}' isn't a version number — "
+                f"check the 'Set as latest release' flag on the GitHub release page."
+            )
+        return None
     if not latest:
         if not silent:
             raise RuntimeError("GitHub returned a release without a version tag.")

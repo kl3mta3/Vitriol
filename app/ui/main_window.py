@@ -545,7 +545,18 @@ class MainWindow(QMainWindow):
         self._status(f"Added {len(paths)} item(s).")
 
     # --- Per-item ----------------------------------------------------------
-    def _start_convert(self, widget: PlaylistItemWidget) -> None:
+    def _start_convert(self, widget: PlaylistItemWidget,
+                        skip_preflight: bool = False) -> None:
+        """Submit a single row's conversion to the queue.
+
+        `skip_preflight=True` is passed by the bulk handlers (Convert All /
+        Convert Selected) after they've already run their own batch
+        dialog and stamped the answer onto each eligible row. Direct
+        row-Convert clicks (via `convert_requested` signal) leave it at
+        the default False so the per-row animation prompt fires fresh
+        on every click — addresses the "asks once and never again" bug
+        where a re-Convert silently reused the previous answer.
+        """
         if widget.is_running():
             return
         target_ext = widget.target_ext()
@@ -574,27 +585,24 @@ class MainWindow(QMainWindow):
                 ):
                     return
             widget._verify_warned = True
-        # Single-row animation pre-flight. The bulk handlers already mark
-        # _animation_choice_made on rows they prompted for, so this only
-        # fires when the user clicks Transmute on an individual row that
-        # didn't go through the batch prompt.
-        if self._row_needs_animation_prompt(widget):
-            msg = (
-                f"{widget.path.name} contains animation/rig data, and "
-                f"{target_ext} can carry it.\n\n"
-                "Try to preserve animations during conversion?\n\n"
-                "Yes — best-effort preservation. Some rigs and keyframes "
-                "may survive, others may not, depending on Assimp's exporter "
-                "for this format pair.\n\n"
-                "No — strip animations cleanly. Output is deterministically "
-                "static geometry."
-            )
-            yes, _ = dialogs.confirm_with_apply_to_all(
-                self, "Preserve 3D animations?", msg,
-                apply_label="Apply to all 3D files in this batch"
-            )
-            widget.set_preserve_animations(yes)
-            widget._animation_choice_made = True
+        # Single-row animation pre-flight. Skipped when called from a bulk
+        # handler (which ran its own batch dialog already). For direct
+        # row-Convert clicks, clear the sticky `_animation_choice_made`
+        # flag first so each click re-asks — otherwise the answer to
+        # the first Convert would silently apply to every subsequent
+        # Convert on the same row.
+        if not skip_preflight:
+            widget._animation_choice_made = False
+            if self._row_needs_animation_prompt(widget):
+                msg = self._animation_prompt_message(
+                    widget.path.name, widget.src_ext.lower(), target_ext.lower()
+                )
+                yes, _ = dialogs.confirm_with_apply_to_all(
+                    self, "Preserve 3D animations?", msg,
+                    apply_label="Apply to all 3D files in this batch"
+                )
+                widget.set_preserve_animations(yes)
+                widget._animation_choice_made = True
         widget.reset_for_rerun()
         widget.set_status(Status.RUNNING)
         out = widget.output_path()
@@ -751,12 +759,37 @@ class MainWindow(QMainWindow):
                      and self._row_needs_animation_prompt(w)]
         if not eligible:
             return True
-        msg = (
-            f"{len(eligible)} item(s) in this batch contain animation/rig data "
-            f"and have target formats that can carry it.\n\n"
+        # Customize the warning text based on whether ANY eligible row
+        # targets FBX from a non-FBX source — that's the format pair
+        # with the known bind-pose-missing bug. Other format pairs
+        # (FBX/GLB → DAE, FBX → GLB) preserve animations correctly.
+        any_lossy_fbx_target = any(
+            w.target_ext().lower() == ".fbx" and w.src_ext.lower() != ".fbx"
+            for w in eligible
+        )
+
+        head = (f"{len(eligible)} item(s) in this batch contain animation/rig "
+                f"data and have target formats that can carry it.\n\n")
+
+        if any_lossy_fbx_target:
+            warning = (
+                "Note — at least one row converts to FBX from a non-FBX source.\n"
+                "That specific direction (GLB → FBX, DAE → FBX) has a known\n"
+                "limitation: animation curves export but the bind-pose link\n"
+                "between mesh and skeleton is lost, so the resulting FBX plays\n"
+                "the animation with the mesh stuck in T-pose while the skeleton\n"
+                "moves separately. Other directions in this batch (FBX → GLB,\n"
+                "FBX → DAE, GLB → DAE) preserve animations correctly.\n\n"
+                "Workaround for the affected rows: convert to .dae instead and\n"
+                "use Blender (or Maya / 3ds Max) to finalize as FBX from there.\n\n"
+            )
+        else:
+            warning = ""
+
+        msg = head + warning + (
             "Try to preserve animations during conversion?\n\n"
-            "Yes — best-effort preservation. Actual outcome depends on the "
-            "format pair; some rigs and keyframes may survive, others may not.\n\n"
+            "Yes — animations export. Faithful for FBX → GLB / FBX → DAE / "
+            "GLB → DAE; partial for the GLB→FBX / DAE→FBX cases noted above.\n\n"
             "No — strip animations cleanly. Output is deterministically static "
             "geometry, predictable across all formats."
         )
@@ -769,19 +802,70 @@ class MainWindow(QMainWindow):
             w._animation_choice_made = True
         return True
 
+    def _animation_prompt_message(self, filename: str,
+                                    src_ext: str, target_ext: str) -> str:
+        """Build the text for the per-row animation-preservation prompt.
+
+        Customized by source/target ext pair so the user gets honest
+        information about which conversions preserve animations cleanly
+        and which are known to lose bind pose. The lossy case is
+        specifically: source is GLB or DAE (or any non-FBX 3D format)
+        and target is FBX. Assimp's FBX exporter doesn't write the
+        BindPose / PoseNode chunks for that input, so the resulting FBX
+        plays animations correctly but with the mesh stuck in T-pose
+        while the skeleton hops separately.
+        """
+        head = (f"{filename} contains animation/rig data, and "
+                f"{target_ext} can carry it.\n\n")
+
+        if target_ext == ".fbx" and src_ext != ".fbx":
+            return head + (
+                "⚠ Known limitation: " + src_ext + " → .fbx loses bind-pose data\n"
+                "during export (Assimp's FBX exporter doesn't emit the BindPose\n"
+                "chunks for skinned meshes from glTF or Collada input). The\n"
+                "resulting .fbx plays the animation, but the mesh will stay in\n"
+                "T-pose while the skeleton animates separately.\n\n"
+                "Workaround: convert to .dae here, then open the .dae in Blender\n"
+                "(or Maya / 3ds Max) and export FBX from there. Vitriol's .dae\n"
+                "export preserves bind pose correctly; Blender's FBX exporter\n"
+                "emits the bind-pose chunks Assimp's doesn't.\n\n"
+                "Try to preserve animations during this conversion anyway?\n\n"
+                "Yes — animation curves export, but bind pose is lost (T-pose\n"
+                "with hopping skeleton when played).\n\n"
+                "No — strip animations cleanly. Output is deterministic static\n"
+                "geometry."
+            )
+
+        # FBX → anything, GLB → DAE, FBX → GLB, etc. — clean paths.
+        return head + (
+            "Try to preserve animations during conversion?\n\n"
+            "Yes — animation preserved. The " + src_ext + " → " + target_ext + "\n"
+            "format pair carries skin and animation data faithfully through\n"
+            "Vitriol's export.\n\n"
+            "No — strip animations cleanly. Output is deterministic static\n"
+            "geometry."
+        )
+
     def _on_convert_all(self) -> None:
         items = self.playlist.items()
         if not items:
             return
         if not dialogs.confirm(self, "Convert all?", f"Convert all {len(items)} item(s) in the playlist?"):
             return
+        # Clear sticky animation choices so this Convert click runs the
+        # bulk preflight fresh — each batch should re-ask if any rows are
+        # eligible, even if the user already answered in a previous run.
+        for w in items:
+            w._animation_choice_made = False
         if not self._bulk_verify_preflight(items):
             return
         if not self._bulk_animation_preflight(items):
             return
         for w in items:
             if not w.is_running() and w.status() != Status.DONE:
-                self._start_convert(w)
+                # skip_preflight: the bulk dialog above already covered
+                # animation preservation for every eligible row in this batch.
+                self._start_convert(w, skip_preflight=True)
 
     def _on_convert_selected(self) -> None:
         items = self.playlist.checked_items()
@@ -790,13 +874,16 @@ class MainWindow(QMainWindow):
             return
         if not dialogs.confirm(self, "Convert selected?", f"Convert {len(items)} selected item(s)?"):
             return
+        # Clear sticky animation choices — see the comment in _on_convert_all.
+        for w in items:
+            w._animation_choice_made = False
         if not self._bulk_verify_preflight(items):
             return
         if not self._bulk_animation_preflight(items):
             return
         for w in items:
             if not w.is_running():
-                self._start_convert(w)
+                self._start_convert(w, skip_preflight=True)
 
     def _on_remove_selected(self) -> None:
         items = self.playlist.checked_items()

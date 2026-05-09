@@ -46,6 +46,14 @@ ANIMATION_CAPABLE_TARGETS = {".fbx", ".dae", ".glb", ".gltf"}
 _aiProcess_Triangulate = 0x8
 _aiProcess_GenNormals = 0x20
 _aiProcess_JoinIdenticalVertices = 0x2
+# `aiProcess_PopulateArmatureData` (0x4000) populates `aiNode.mArmature`
+# pointers on import. Some Assimp exporters use these to emit proper
+# bind-pose data; the FBX exporter unfortunately does NOT (see comment
+# in `convert()` about the GLB → FBX skinning limitation). We pass it
+# anyway because it's harmless and helps the future-version case
+# where the FBX exporter starts honoring it, plus other targets like
+# .dae use the armature data correctly today.
+_aiProcess_PopulateArmatureData = 0x4000
 
 # Map output ext -> Assimp format-id strings (from aiGetExportFormatDescription)
 _FORMAT_IDS = {
@@ -198,7 +206,25 @@ def convert(
         raise RuntimeError(f"No Assimp exporter for {dst_ext}.")
 
     progress(0.05)
-    flags = _aiProcess_Triangulate | _aiProcess_GenNormals | _aiProcess_JoinIdenticalVertices
+    # Standard geometry-cleanup flags. PopulateArmatureData is included
+    # for skinned-mesh round-trip support — it's mandatory for some
+    # exporters (.dae) and harmless for others. Notably it does NOT
+    # fully fix GLB → FBX skinning round-trips: Assimp's FBX exporter
+    # has a long-standing limitation where it doesn't emit `BindPose`
+    # or `PoseNode` chunks when the source came from glTF. The exported
+    # FBX is structurally valid and includes Skin / Cluster nodes for
+    # bone-to-vertex bindings, but tools that load it find no rest-pose
+    # data and end up with the mesh stuck in T-pose while the skeleton
+    # animates separately — the "hopping in T-pose" symptom. There is
+    # no Assimp flag that fixes this; a real fix would require either
+    # patching Assimp's FBX exporter or post-processing the output FBX
+    # to inject BindPose nodes, both out of scope for this round.
+    # FBX → GLB direction works correctly; only the reverse direction
+    # is affected.
+    flags = (_aiProcess_Triangulate
+             | _aiProcess_GenNormals
+             | _aiProcess_JoinIdenticalVertices
+             | _aiProcess_PopulateArmatureData)
     scene = dll.aiImportFile(str(src).encode("utf-8"), flags)
     if not scene:
         err = dll.aiGetErrorString() or b""

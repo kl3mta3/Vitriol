@@ -36,7 +36,7 @@ import struct
 import subprocess
 import zlib
 from pathlib import Path
-from typing import Callable, Iterator, Tuple
+from typing import Callable, Iterator, Optional, Tuple
 
 from ..utils.cancellation import CancellationToken
 from ..utils.paths import bin_dir
@@ -4149,6 +4149,422 @@ def _py_embed_to_file(src_path: Path, src_ext: str, dst: Path,
                                   cancel=cancel, src_filename=src_filename)
 
 
+# =====================================================================
+# Stone .py v4 — opaque-bootstrap format
+# =====================================================================
+#
+# Replaces the v3 base64-tuple-of-strings format used by encrypted .py
+# outputs. Two problems v3 had:
+#
+#   1. Multi-second startup delay before the password prompt: Python's
+#      parser had to tokenize + concat thousands of base64 string literals
+#      in `_data = ("..." "..." ... × thousands)` BEFORE any user code
+#      could run. For a 30 MB payload that's ~5–10 s on a typical machine,
+#      longer with antivirus scanning the file as it's read.
+#
+#   2. The .py was readable in any text editor — the entire runtime
+#      (password handling, HMAC counter math, registry path obfuscation,
+#      self-delete logic) was visible Python source.
+#
+# v4 fixes both with a single change: the outer runtime is encrypted in
+# the same blob as the payload, and everything BUT a small bootstrap
+# becomes opaque ciphertext. The blob is stored as ONE base64 string in
+# the source — Python parses it as a single STRING token instead of a
+# tuple of thousands, dropping parse time from ~10 s to <100 ms regardless
+# of payload size.
+#
+# Format on disk (encoded as Python source):
+#
+#   _v4 = "<single base64 string>"
+#       │
+#       └─→ base64-decoded blob:
+#           magic         b"VTSv4\0"   6 B
+#           file_id       8 B           random per-file (counter HMAC key)
+#           iv_outer     16 B           AES-CTR IV for outer runtime
+#           iv_payload   16 B           AES-CTR IV for payload
+#           visible_hash 32 B           SHA-256 of original plaintext payload
+#           outer_hash   32 B           SHA-256 of plaintext outer-runtime
+#                                       source — used as the password
+#                                       verify token (decrypt outer_ct,
+#                                       hash it, compare to this).
+#           outer_size    4 B uint32 LE
+#           payload_size  8 B uint64 LE
+#           outer_ct     <outer_size> B encrypted outer-runtime source
+#           payload_ct   <payload_size> B encrypted payload (filename
+#                                          header + raw bytes)
+#
+#   ... # == VITRIOL STONE v4 ==          ← marker comment
+#
+#   <bootstrap Python — visible source ~120 lines>
+#
+# What's visible: bootstrap with imports, counter mechanism, password
+# prompt, decrypt outer + hash check, exec.
+#
+# What's NOT visible (opaque inside outer_ct): the actual payload-decrypt
+# logic, the post-decrypt SHA-256 tamper check, the tamper-response
+# (set attempts to MAX + self-delete), filename parsing, file write,
+# success-case attempts-counter clear.
+#
+# The .exe path (`_exe_embed_to_file`) keeps using the v3 format inside
+# the PyInstaller stub — `selfextract_stub.exe` already provides full
+# opacity (the bundle is binary, not Python source visible to a viewer)
+# so v4's format gain is moot there. v4 applies to .py outputs only.
+
+_V4_MAGIC = b"VTSv4\0"
+_V4_HEADER_FMT = "<6s8s16s16s32s32sIQ"
+# struct fields: magic, file_id, iv_outer, iv_payload, visible_hash,
+#                outer_hash, outer_size (uint32 LE), payload_size (uint64 LE)
+_V4_HEADER_LEN = 6 + 8 + 16 + 16 + 32 + 32 + 4 + 8   # = 122
+_V4_SOURCE_MARKER = "# == VITRIOL STONE v4 =="
+_V4_VARIABLE_NAME = "_v4"
+
+
+# Outer runtime — gets AES-CTR-encrypted with the password-derived key
+# BEFORE being embedded in the generated .py's blob. End users opening
+# the .py in a text editor see only the bootstrap + a base64 blob of
+# this code, not the code itself. The bootstrap decrypts and execs this
+# on a successful password match.
+#
+# Globals available (provided by the bootstrap's exec call):
+#   _key                 (bytes, AES key)
+#   _iv_payload          (bytes, 16-byte AES-CTR IV for the payload)
+#   _visible_hash        (bytes, 32-byte SHA-256 of original payload)
+#   _payload_ct          (bytes, encrypted payload blob)
+#   _file_id             (str, hex; same value the bootstrap used for counter)
+#   _attempts_set        (callable, signature: (file_id, n))
+#   _self_delete         (callable, no-arg)
+#   _MAX                 (int, max attempts before lockout — 5)
+_PY_OUTER_RUNTIME_V4 = r'''
+import struct as _st
+import hashlib as _hl
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+# Decrypt the payload blob: [filename_len 2B BE][filename UTF-8][payload]
+_dec = Cipher(algorithms.AES(_key), modes.CTR(_iv_payload),
+              backend=default_backend()).decryptor()
+_pt = _dec.update(_payload_ct) + _dec.finalize()
+if len(_pt) < 2:
+    print("File integrity check failed. File deleted.")
+    _attempts_set(_file_id, _MAX)
+    _self_delete()
+    raise SystemExit(1)
+_fl = _st.unpack(">H", _pt[:2])[0]
+if 2 + _fl > len(_pt) or _fl > 4096:
+    print("File integrity check failed. File deleted.")
+    _attempts_set(_file_id, _MAX)
+    _self_delete()
+    raise SystemExit(1)
+_real_filename = _pt[2:2 + _fl].decode("utf-8", errors="replace")
+_payload = _pt[2 + _fl:]
+
+# Hash check — REQUIRED. If the decrypted payload doesn't match the
+# embedded SHA-256, the file was tampered with. Tamper response: lock
+# the counter to MAX (so any preserved copies are invalidated) and
+# self-delete this copy. Generic message — doesn't leak which check
+# failed (matches the no-oracle property of the rest of Stone mode).
+if _hl.sha256(_payload).digest() != _visible_hash:
+    print("File integrity check failed. File deleted.")
+    _attempts_set(_file_id, _MAX)
+    _self_delete()
+    raise SystemExit(1)
+
+# Right password AND intact payload — write the file.
+import time as _time
+_t0 = _time.time()
+print("Rebuilding " + _real_filename + "...", flush=True)
+with open(_real_filename, "wb") as _f:
+    _f.write(_payload)
+print("Done in %.1fs." % (_time.time() - _t0))
+
+# Success: clear the failed-attempt counter for this file (so a future
+# legitimate run after some prior wrong-password attempts doesn't carry
+# the strikes forward).
+_attempts_set(_file_id, 0)
+
+# Self-delete the .py — same one-shot pattern as v3.
+_self_delete()
+'''
+
+
+# Bootstrap — the visible portion of an encrypted v4 .py. Compact (~120
+# lines), reveals only that it's a self-extracting password-protected
+# script with a counter mechanism. Does NOT reveal the actual decrypt
+# logic, the tamper response, or the payload structure (those live
+# encrypted in `_v4`'s outer_ct).
+#
+# Two values get .format()-substituted at build time:
+#   {V4VAR}     name of the source variable that holds the base64 blob
+#   {SENTINEL}  human-visible "# == VITRIOL STONE v4 ==" marker
+# Everything else is literal — adjacent {{ and }} are escaped braces
+# (Python format placeholder mechanism).
+_PY_BOOTSTRAP_V4 = r'''
+import sys, os, hashlib, getpass, base64, struct
+
+# Decode the embedded blob. The Python parser sees `{V4VAR}` as ONE
+# string token regardless of payload size — drops parse-compile from
+# ~10s to <100ms compared to the v3 tuple-of-thousands-of-strings format.
+_blob = base64.b64decode({V4VAR})
+if _blob[:6] != b"VTSv4\0":
+    sys.exit(1)
+_file_id = _blob[6:14].hex()
+_iv_outer    = _blob[14:30]
+_iv_payload  = _blob[30:46]
+_visible_hash= _blob[46:78]
+_outer_hash  = _blob[78:110]
+_outer_sz    = struct.unpack("<I", _blob[110:114])[0]
+_payload_sz  = struct.unpack("<Q", _blob[114:122])[0]
+_off         = 122
+_outer_ct    = _blob[_off:_off + _outer_sz]; _off += _outer_sz
+_payload_ct  = _blob[_off:_off + _payload_sz]
+
+# --- Counter mechanism (visible — has to gate before any decrypt) ----
+# Storage location is NOT named after Vitriol — looks like a generic
+# system entry. Value is HMAC-magic-encoded so a manual regedit or JSON
+# inspection doesn't reveal the raw counter (and editing it to 0 locks
+# out instead of resetting). Same design as v3.
+_REG_KEY = bytes([83,111,102,116,119,97,114,101,92,95,56,55,
+                  50,54,55,54,56,56,51]).decode("ascii")
+_POSIX_NAME = bytes([46,56,55,50,54,55,54,56,56,51]).decode("ascii")
+_MAX = 5
+
+def _hkey(fid): return fid.encode("ascii", errors="replace")
+
+def _magic(fid, n):
+    import hmac as _h
+    return int.from_bytes(_h.new(_hkey(fid), bytes([n & 0xFF]),
+                                 "sha256").digest()[:4], "big")
+
+def _count(fid, m):
+    for c in range(_MAX + 1):
+        if _magic(fid, c) == m:
+            return c
+    return _MAX
+
+def _attempts_get(fid):
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG_KEY) as k:
+                v, _ = winreg.QueryValueEx(k, fid)
+                return _count(fid, int(v))
+        except OSError:
+            return 0
+    import json, pathlib
+    try:
+        d = json.loads((pathlib.Path.home() / _POSIX_NAME).read_text("utf-8"))
+        return _count(fid, int(d.get(fid, 0)))
+    except (OSError, ValueError):
+        return 0
+
+def _attempts_set(fid, n):
+    m = _magic(fid, int(n))
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG_KEY) as k:
+                winreg.SetValueEx(k, fid, 0, winreg.REG_DWORD, m)
+        except OSError:
+            pass
+        return
+    import json, pathlib
+    p = pathlib.Path.home() / _POSIX_NAME
+    try:
+        d = json.loads(p.read_text("utf-8"))
+    except (OSError, ValueError):
+        d = {{}}
+    if not isinstance(d, dict):
+        d = {{}}
+    d[fid] = m
+    try:
+        p.write_text(json.dumps(d), encoding="utf-8")
+    except OSError:
+        pass
+
+def _self_delete():
+    try:
+        if sys.platform == "win32":
+            import subprocess as _sp, tempfile as _tf
+            _bf, _bp = _tf.mkstemp(suffix=".bat"); os.close(_bf)
+            with open(_bp, "w", encoding="ascii") as _b:
+                _b.write("@echo off\r\nping 127.0.0.1 -n 2 >nul\r\n")
+                _b.write('del /q "%s"\r\n' % __file__)
+                _b.write('(goto) 2>nul & del /q "%s"\r\n' % _bp)
+            _sp.Popen(["cmd", "/c", "start", "/b", "", "cmd", "/c", _bp],
+                      creationflags=0x08 | 0x200, stdin=_sp.DEVNULL,
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, close_fds=True)
+        else:
+            os.unlink(__file__)
+    except OSError:
+        pass
+
+# --- Pre-flight: locked out? ----------------------------------------
+_attempts = _attempts_get(_file_id)
+if _attempts >= _MAX:
+    print("Too many failed attempts. This file has been invalidated.")
+    _self_delete()
+    sys.exit(1)
+
+# --- Prompt ----------------------------------------------------------
+print("Loading...", flush=True)
+print("Rebuilding ...", flush=True)
+print("... This could take a while", flush=True)
+sys.stdout.write("Password: "); sys.stdout.flush()
+try:
+    _is_tty = sys.stdin.isatty()
+except Exception:
+    _is_tty = True
+try:
+    _pw = getpass.getpass("") if _is_tty else input("")
+except Exception:
+    _pw = input("")
+
+# --- Crypto: derive key, decrypt outer runtime, hash-check -----------
+try:
+    import cryptography  # noqa: F401
+except ImportError:
+    print("This script needs the 'cryptography' Python library to decrypt.")
+    _resp = input("Install it now via pip? [Y/n]: ").strip().lower()
+    if _resp and _resp[0] != "y":
+        print("Cannot proceed without 'cryptography'. Exiting.")
+        sys.exit(1)
+    import subprocess as _sp
+    try:
+        _sp.check_call([sys.executable, "-m", "pip", "install", "cryptography"])
+    except Exception:
+        print("pip install failed. Cannot proceed.")
+        sys.exit(1)
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+_key = hashlib.pbkdf2_hmac("sha256", _pw.encode("utf-8"),
+                           b"transmute-stone-v3", 200000)
+_dec = Cipher(algorithms.AES(_key), modes.CTR(_iv_outer),
+              backend=default_backend()).decryptor()
+_outer_pt = _dec.update(_outer_ct) + _dec.finalize()
+
+if hashlib.sha256(_outer_pt).digest() != _outer_hash:
+    # Wrong password (or tampered outer_ct). Generic message; counter
+    # increments; on the 5th failed attempt the .py self-deletes.
+    _attempts_set(_file_id, _attempts + 1)
+    print("Wrong password. %d/%d attempts used." % (_attempts + 1, _MAX))
+    if _attempts + 1 >= _MAX:
+        print("File deleted.")
+        _self_delete()
+    sys.exit(1)
+
+# Right password — hand off to the (encrypted-until-now) outer runtime.
+exec(compile(_outer_pt, "<vitriol-outer>", "exec"), {{
+    "_key": _key,
+    "_iv_payload": _iv_payload,
+    "_visible_hash": _visible_hash,
+    "_payload_ct": _payload_ct,
+    "_file_id": _file_id,
+    "_attempts_set": _attempts_set,
+    "_self_delete": _self_delete,
+    "_MAX": _MAX,
+    "__file__": __file__,
+}})
+'''
+
+
+def _build_py_source_encrypted_v4(src_path: Path, src_ext: str,
+                                    password: bytes,
+                                    cancel: Optional["CancellationToken"] = None,
+                                    src_filename: Optional[str] = None) -> bytes:
+    """Build a v4-format encrypted self-extracting .py and return its bytes.
+
+    Wire format on disk (UTF-8 source):
+
+        _v4 = "<single base64 string of binary blob>"
+        # == VITRIOL STONE v4 ==
+        <bootstrap Python — visible, ~120 lines>
+
+    The binary blob (post-base64-decode) holds magic + IVs + hashes +
+    sizes + outer-runtime ciphertext + payload ciphertext. See
+    `_PY_OUTER_RUNTIME_V4` and `_PY_BOOTSTRAP_V4` for the field layout
+    that's parsed at runtime.
+
+    Used by `_py_embed_to_file_encrypted` for .py outputs. The .exe
+    path uses the older `_build_py_source_encrypted` because the
+    PyInstaller stub already provides opacity via its binary wrapper —
+    no benefit from re-doing the work in v4 format inside the stub's
+    embedded payload.
+    """
+    from . import _stone_crypto as _sc
+
+    if src_filename is None:
+        src_filename = src_path.name
+
+    # Pass 1 — hash plaintext for visible_hash (32 bytes) and load the
+    # full plaintext into a buffer so we can encrypt it as one CTR stream
+    # below. For very large payloads this could be streamed instead;
+    # current implementation loads into memory which matches v3's pattern.
+    sha = hashlib.sha256()
+    with open(src_path, "rb") as f:
+        plaintext = f.read()
+    if cancel is not None:
+        cancel.check()
+    sha.update(plaintext)
+    visible_hash = sha.digest()
+
+    # Build the payload plaintext: [filename_len 2B BE][filename UTF-8][raw payload]
+    real_fname_bytes = src_filename.encode("utf-8")[:65535]
+    payload_pt = (struct.pack(">H", len(real_fname_bytes))
+                  + real_fname_bytes
+                  + plaintext)
+
+    # Generate cryptographically random per-file IDs / IVs. file_id
+    # functions as the HMAC key for the counter magic — different per
+    # file means cross-file counter inspection reveals nothing.
+    import secrets
+    file_id = secrets.token_bytes(8)
+    iv_outer = secrets.token_bytes(16)
+    iv_payload = secrets.token_bytes(16)
+
+    key = _sc.derive_key(password)
+
+    # Encrypt the payload (filename + raw bytes).
+    enc_pay = _sc.StreamingEncryptor(key, iv_payload)
+    payload_ct = enc_pay.update(payload_pt) + enc_pay.finalize()
+
+    # Encrypt the outer runtime — strip comments/docstrings first so the
+    # encrypted form is the minimal bytecode-equivalent source. Hash the
+    # plaintext source for the password-verify token.
+    outer_pt_str = _strip_py_for_minimal_output(_PY_OUTER_RUNTIME_V4)
+    outer_pt = outer_pt_str.encode("utf-8")
+    outer_hash = hashlib.sha256(outer_pt).digest()
+    enc_outer = _sc.StreamingEncryptor(key, iv_outer)
+    outer_ct = enc_outer.update(outer_pt) + enc_outer.finalize()
+
+    # Pack the binary blob. Format must match what `_PY_BOOTSTRAP_V4`
+    # parses at runtime (and what `_py_extract_to_file` parses for
+    # Vitriol-side drop-in extraction).
+    header = struct.pack(_V4_HEADER_FMT,
+                          _V4_MAGIC, file_id, iv_outer, iv_payload,
+                          visible_hash, outer_hash,
+                          len(outer_ct), len(payload_ct))
+    blob = header + outer_ct + payload_ct
+    blob_b64 = base64.b64encode(blob).decode("ascii")
+
+    # Compose the source. The base64 string sits on a single line as
+    # one Python literal — Python's lexer reads it as ONE STRING token
+    # regardless of size, instead of v3's tuple of thousands of literals
+    # which forced the parser to do thousands of token-concat operations.
+    bootstrap_src = _PY_BOOTSTRAP_V4.format(
+        V4VAR=_V4_VARIABLE_NAME,
+        SENTINEL=_V4_SOURCE_MARKER,
+    )
+    bootstrap_src = _strip_py_for_minimal_output(bootstrap_src)
+
+    out_lines = [
+        f'{_V4_VARIABLE_NAME} = "{blob_b64}"',
+        _V4_SOURCE_MARKER,
+        bootstrap_src.rstrip() + "\n",
+    ]
+    return ("\n".join(out_lines)).encode("utf-8")
+
+
 def _build_py_source_plain(src_path: Path,
                              cancel: Optional["CancellationToken"] = None,
                              src_filename: Optional[str] = None) -> bytes:
@@ -4359,23 +4775,143 @@ def _py_embed_to_file_encrypted(src_path: Path, src_ext: str, dst: Path,
                                   src_filename: Optional[str] = None) -> None:
     """Encrypted (password-protected) self-extracting .py.
 
-    Encryption: AES-256-CTR with PBKDF2-200k key derivation (same primitives
-    as Stone v3 envelopes). The combined plaintext is `sha256(payload) ||
-    payload` — a single ciphertext where the first 32 bytes are the
-    encrypted hash (used at runtime to verify the password without
-    decrypting the whole payload) and the rest is the encrypted payload.
+    As of v4, .py outputs use the bootstrap-+-blob format defined by
+    `_build_py_source_encrypted_v4`: ~120 lines of visible bootstrap
+    Python (counter mechanism, password prompt, decrypt outer runtime,
+    hash-check, exec) plus a single base64 string holding the entire
+    encrypted blob (outer runtime ciphertext + payload ciphertext +
+    headers). Parse-compile time stays sub-100ms regardless of payload
+    size; the actual decrypt logic, tamper response, and file-write
+    code live encrypted inside the blob and are never visible in a
+    text editor.
 
-    Embedded in the script:
-      - visible_hash (hex of plaintext SHA-256) — for tamper-display and
-        password-verification anchor
-      - iv (hex of 16-byte AES-CTR IV) — required to decrypt
-      - data (base64'd combined ciphertext)
+    The .exe path keeps using the older v3 source (`_build_py_source_encrypted`)
+    because PyInstaller's stub already provides full opacity for that
+    output type — no win from re-doing it in v4 inside the stub.
+
+    Encryption primitives are unchanged: AES-256-CTR with PBKDF2-200k
+    key derivation (same as Stone v3 envelopes).
     """
-    src_bytes = _build_py_source_encrypted(src_path, src_ext, password,
-                                              cancel=cancel,
-                                              src_filename=src_filename)
+    src_bytes = _build_py_source_encrypted_v4(src_path, src_ext, password,
+                                                cancel=cancel,
+                                                src_filename=src_filename)
     with open(dst, "wb") as out:
         out.write(src_bytes)
+
+
+def _v4_extract(src: Path, dst_path: Path,
+                 password: bytes = b"",
+                 cancel: Optional["CancellationToken"] = None) -> Optional[str]:
+    """Try to parse `src` as a v4-format encrypted Stone .py. Returns
+    the recovered source extension on success, or None if the file
+    isn't v4 (caller falls back to the legacy parser).
+
+    Detection: look for `_v4 = "` as the first non-blank, non-comment
+    line. v4 files always emit the assignment as the first statement.
+
+    Failure modes return None (let legacy parser try) only when the
+    detection fails. Once v4 detection succeeds, decryption errors
+    raise ValueError so the caller surfaces them instead of silently
+    falling back.
+    """
+    # Detection — read just enough of the first line to confirm.
+    try:
+        with open(src, "rb") as f:
+            head = f.read(32)
+    except OSError:
+        return None
+    if not head.startswith(b"_v4 = \""):
+        return None
+
+    # Confirmed v4. Read the full first line — it's the entire base64
+    # blob on one line, terminated by closing quote + newline.
+    with open(src, "rb") as f:
+        # The first line can be arbitrarily long (multi-MB for big
+        # payloads). readline() handles that; Python's stdio buffers in
+        # 8K chunks under the hood so memory stays bounded by the line
+        # length itself, not by some larger window.
+        first_line = f.readline().decode("utf-8", errors="replace")
+
+    # Strip trailing newline, leading/trailing whitespace, and the
+    # `_v4 = "` ... `"` wrapper. Validate strictly so a malformed file
+    # raises rather than silently producing garbage.
+    line = first_line.rstrip("\r\n").strip()
+    prefix = '_v4 = "'
+    if not line.startswith(prefix) or not line.endswith('"'):
+        raise ValueError("Stone .py v4: malformed _v4 assignment line.")
+    blob_b64 = line[len(prefix):-1]
+    try:
+        # binascii.Error (raised by b64decode for invalid input) is a
+        # subclass of ValueError — single catch covers both.
+        blob = base64.b64decode(blob_b64, validate=True)
+    except ValueError as e:
+        raise ValueError(f"Stone .py v4: malformed base64 in _v4: {e}") from e
+
+    if len(blob) < _V4_HEADER_LEN:
+        raise ValueError("Stone .py v4: blob shorter than header.")
+    if blob[:6] != _V4_MAGIC:
+        raise ValueError(
+            f"Stone .py v4: wrong magic ({blob[:6]!r}, expected {_V4_MAGIC!r})."
+        )
+    (magic, _file_id_bytes, iv_outer, iv_payload, visible_hash,
+     outer_hash, outer_sz, payload_sz) = struct.unpack(_V4_HEADER_FMT,
+                                                          blob[:_V4_HEADER_LEN])
+
+    expected_total = _V4_HEADER_LEN + outer_sz + payload_sz
+    if len(blob) < expected_total:
+        raise ValueError(
+            f"Stone .py v4: blob truncated (have {len(blob)} B, "
+            f"need {expected_total} B)."
+        )
+
+    # We don't need the outer runtime to extract — we re-implement its
+    # 25-line decrypt-and-write logic here in Python directly. (Vitriol
+    # never has to *run* the outer runtime to recover the payload; that's
+    # only needed when running the .py directly.) Skipping the outer
+    # decrypt also means a wrong password just produces garbage at the
+    # SHA-256 step below, matching the no-oracle invariant.
+    payload_off = _V4_HEADER_LEN + outer_sz
+    payload_ct = blob[payload_off:payload_off + payload_sz]
+
+    # Cancellation hook — for huge payloads, give the queue a chance to
+    # bail out after the header parse and before AES does its work.
+    if cancel is not None:
+        cancel.check()
+
+    from . import _stone_crypto as _sc
+    try:
+        plaintext = _sc.decrypt(iv_payload, payload_ct, password)
+    except Exception as e:
+        raise ValueError(f"Stone .py v4: decrypt failed: {e}") from e
+
+    if len(plaintext) < 2:
+        raise ValueError("Stone .py v4: decrypted payload too short.")
+    fname_len = struct.unpack(">H", plaintext[:2])[0]
+    if 2 + fname_len > len(plaintext) or fname_len > 4096:
+        # Wrong-password decrypt produces garbage that won't have a
+        # plausible filename header. Mirror the v3 behavior: write
+        # whatever bytes follow the header and let downstream code
+        # discover the SHA-256 mismatch.
+        payload = plaintext[2:]
+        src_filename = ""
+    else:
+        src_filename = plaintext[2:2 + fname_len].decode("utf-8",
+                                                            errors="replace")
+        payload = plaintext[2 + fname_len:]
+
+    # Hash check — same protection as the runtime path's tamper response.
+    # Vitriol's drop-in extractor doesn't self-delete (we don't own the
+    # file the way a runtime invocation does), but we DO refuse to write
+    # garbage to disk on tamper or wrong password.
+    if visible_hash != hashlib.sha256(payload).digest():
+        raise ValueError(
+            "Stone .py v4: payload hash mismatch (wrong password or tampered file)."
+        )
+
+    src_ext = Path(src_filename).suffix.lower() or ".bin"
+    with open(dst_path, "wb") as out:
+        out.write(payload)
+    return src_ext
 
 
 def _py_extract_to_file(src: Path, dst_path: Path,
@@ -4385,11 +4921,15 @@ def _py_extract_to_file(src: Path, dst_path: Path,
     payload and write it to dst_path. Returns the recovered source
     extension.
 
-    Handles both variants:
-      - UCMSv2-py     : plain base64-encoded payload. `_data` is the
-                        base64 of the original bytes.
-      - UCMSv2-py-enc : encrypted (AES-256-CTR). `_data` is base64 of
-                        the combined ciphertext (encrypted_hash ||
+    Handles three on-disk variants:
+      - v4 (encrypted, current format): single `_v4 = "<base64>"` line
+        followed by the visible bootstrap. The base64 decodes to a
+        binary blob with magic + IVs + hashes + sizes + outer-runtime
+        ciphertext + payload ciphertext. Parsed by `_v4_extract` below.
+      - UCMSv2-py     : legacy plain base64-encoded payload. `_data` is
+                        the base64 of the original bytes.
+      - UCMSv2-py-enc : legacy encrypted (AES-256-CTR). `_data` is base64
+                        of the combined ciphertext (encrypted_hash ||
                         encrypted_payload). `_iv_hex` and `_visible_hash`
                         appear above `_data`. Caller must provide the
                         correct `password` or this raises ValueError.
@@ -4397,6 +4937,12 @@ def _py_extract_to_file(src: Path, dst_path: Path,
                         SHA-256 check below catches it — not a leak;
                         same behavior the runtime script would show.)
     """
+    # Try the v4 path first. Cheap detection: look for `_v4 = "` near
+    # the top of the file. If absent, fall through to the legacy
+    # line-by-line parser below.
+    v4_result = _v4_extract(src, dst_path, password=password, cancel=cancel)
+    if v4_result is not None:
+        return v4_result
     sha_expected = ""
     src_filename = ""
     iv_hex = ""

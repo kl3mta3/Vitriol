@@ -205,10 +205,32 @@ def convert_file(
     #      UCMSv1 envelope (we want to extract). A vanilla PNG / WAV / etc.
     #      with no envelope falls through to the regular handler so PNG → JPG,
     #      WAV → MP3, etc. keep working normally even with Stone enabled.
+    #
+    # Same-category-media exception (PNG→JPG, FBX→GLB, MP3→WAV, etc.):
+    # the dropdown UI already advertises these as normal conversions —
+    # turning the Stone toggle on shouldn't reroute them through the
+    # carrier path. The embed branch is suppressed for same-handler
+    # conversions; the extract branch is left alive so dropping a
+    # Stone-mode .png back in (with .png target) still unwraps the
+    # hidden source. Cross-category conversions (image→pdf, doc→png,
+    # anything→.py/.exe/.zip) are unaffected — Stone fires as before.
     if masquerade:
         from ..format_handlers import masquerade as _msq
+
+        # Both src and dst belong to the SAME media handler module —
+        # i.e., it's image→image, audio→audio, video→video, or
+        # model→model. The handler can do the conversion natively;
+        # there's nothing to gain from wrapping the result through Stone.
+        same_media_handler = (
+            src_ext in fh.MEDIA_HANDLERS
+            and dst_ext in fh.MEDIA_HANDLERS
+            and fh.MEDIA_HANDLERS[src_ext] is fh.MEDIA_HANDLERS[dst_ext]
+        )
+
         engage = False
-        if _msq.can_embed_into(dst_ext) and not _msq.is_lossy(src_ext):
+        if (not same_media_handler
+                and _msq.can_embed_into(dst_ext)
+                and not _msq.is_lossy(src_ext)):
             engage = True
         elif _msq.can_extract_from(src_ext) and _msq.has_envelope(src, src_ext):
             engage = True
