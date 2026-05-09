@@ -31,11 +31,11 @@ MEDIA_CATEGORY = "audio"  # overridden per-ext below by registry split
 
 AUDIO_EXTS = {
     ".mp3", ".wav", ".flac", ".ogg", ".opus", ".m4a", ".aac", ".wma",
-    ".aiff", ".alac", ".ac3", ".amr", ".au", ".mka",
+    ".aiff", ".alac", ".ac3", ".amr", ".au", ".mka", ".oga", ".mp2",
 }
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".webm", ".avi", ".mov", ".wmv", ".flv",
-    ".mpg", ".3gp", ".ts", ".vob", ".ogv",
+    ".mpg", ".mpeg", ".3gp", ".ts", ".vob", ".ogv", ".asf", ".f4v", ".m4v",
 }
 SUPPORTED = AUDIO_EXTS | VIDEO_EXTS
 
@@ -60,6 +60,8 @@ _AUDIO_CODECS = {
     ".amr": ["-c:a", "libopencore_amrnb", "-ar", "8000", "-ac", "1"],
     ".au": ["-c:a", "pcm_s16be"],
     ".mka": ["-c:a", "libvorbis", "-q:a", "5"],
+    ".oga": ["-c:a", "libvorbis", "-q:a", "5"],
+    ".mp2": ["-c:a", "mp2", "-b:a", "192k"],
 }
 _VIDEO_CODECS = {
     ".mp4": ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k"],
@@ -70,10 +72,17 @@ _VIDEO_CODECS = {
     ".wmv": ["-c:v", "wmv2", "-b:v", "2M", "-c:a", "wmav2"],
     ".flv": ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "128k"],
     ".mpg": ["-c:v", "mpeg2video", "-q:v", "5", "-c:a", "mp2"],
+    ".mpeg": ["-c:v", "mpeg2video", "-q:v", "5", "-c:a", "mp2"],
     ".3gp": ["-c:v", "libx264", "-preset", "medium", "-crf", "26", "-c:a", "aac", "-b:a", "96k"],
     ".ts": ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "128k"],
     ".vob": ["-c:v", "mpeg2video", "-q:v", "5", "-c:a", "ac3"],
     ".ogv": ["-c:v", "libtheora", "-q:v", "7", "-c:a", "libvorbis", "-q:a", "5"],
+    # ASF and WMV share the wmv2/wmav2 codecs.
+    ".asf": ["-c:v", "wmv2", "-b:v", "2M", "-c:a", "wmav2"],
+    # Flash variants
+    ".f4v": ["-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "128k"],
+    # M4V is just MP4 with H.264/AAC, often Apple-style.
+    ".m4v": ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k"],
 }
 
 
